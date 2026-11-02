@@ -61,7 +61,7 @@ class NapEngine(state: NapState = NapState()) {
         val mono = clock.monotonicMs()
         val session = NapSession(
             id = "nap-${state.nextId}", requestedSeconds = seconds,
-            startedWallMs = wall, startedMonoMs = mono,
+            startedWallMs = wall, startedMonoMs = mono, startedBootCount = clock.bootCount(),
             targetWallMs = wall + seconds * 1000, targetMonoMs = mono + seconds * 1000,
             demoShortened = demoShortened,
         )
@@ -79,10 +79,23 @@ class NapEngine(state: NapState = NapState()) {
     fun remainingMs(clock: Clock): Long? {
         val s = state.session ?: return null
         if (s.status != NapStatus.RESTING && s.status != NapStatus.SNOOZED) return null
-        val mono = clock.monotonicMs()
-        val left = if (mono >= s.startedMonoMs) s.targetMonoMs - mono else s.targetWallMs - clock.wallMs()
+        val left = if (sameBoot(s, clock)) s.targetMonoMs - clock.monotonicMs() else s.targetWallMs - clock.wallMs()
         return left.coerceAtLeast(0)
     }
+
+    /**
+     * 세션을 시작한 부팅과 같은 부팅인지. 부팅 횟수가 다르거나(알 수 있을 때) 단조 시계가 시작값보다 작으면 재부팅이다.
+     * 가동 시간만 보면 재부팅 뒤 오래 켜 둔 경우를 같은 부팅으로 오판한다.
+     */
+    private fun sameBoot(s: NapSession, clock: Clock): Boolean {
+        val boot = clock.bootCount()
+        val bootKnown = boot >= 0 && s.startedBootCount >= 0
+        return clock.monotonicMs() >= s.startedMonoMs && (!bootKnown || boot == s.startedBootCount)
+    }
+
+    /** 지금까지의 실제 경과(ms) */
+    private fun elapsed(s: NapSession, clock: Clock): Long =
+        (if (sameBoot(s, clock)) clock.monotonicMs() - s.startedMonoMs else clock.wallMs() - s.startedWallMs).coerceAtLeast(0)
 
     /** 주기적으로 불러 목표 시각 도달을 확인한다. 끝난 세션·이미 울린 번호는 다시 울리지 않는다. */
     fun tick(clock: Clock): TickEvent {
@@ -114,21 +127,24 @@ class NapEngine(state: NapState = NapState()) {
             NapStatus.OVERDUE -> EndReason.MISSED_WHILE_OFF
             else -> return false
         }
-        state = state.copy(session = s.copy(status = NapStatus.RESTORE_PENDING, endReason = reason, endedWallMs = clock.wallMs()))
+        state = state.copy(session = s.copy(status = NapStatus.RESTORE_PENDING, endReason = reason, endedWallMs = clock.wallMs(), elapsedMs = elapsed(s, clock)))
         return true
     }
 
     /** 시간 전에 종료 */
     fun stopEarly(clock: Clock): Boolean {
         val s = state.session?.takeIf { it.status == NapStatus.RESTING || it.status == NapStatus.SNOOZED } ?: return false
-        state = state.copy(session = s.copy(status = NapStatus.RESTORE_PENDING, endReason = EndReason.STOPPED_EARLY, endedWallMs = clock.wallMs()))
+        state = state.copy(session = s.copy(status = NapStatus.RESTORE_PENDING, endReason = EndReason.STOPPED_EARLY, endedWallMs = clock.wallMs(), elapsedMs = elapsed(s, clock)))
         return true
     }
 
     /** 복구 확인(또는 건너뛰기) 뒤 끝. 기록을 남기고 다음 휴식을 받을 수 있게 비운다. */
     fun finish(): NapRecord? {
         val s = state.session?.takeIf { it.status == NapStatus.RESTORE_PENDING } ?: return null
-        val record = NapRecord(s.id, s.requestedSeconds, s.startedWallMs, s.endedWallMs ?: s.startedWallMs, s.endReason!!, s.snoozeCount, s.demoShortened)
+        val record = NapRecord(
+            s.id, s.requestedSeconds, s.startedWallMs, s.endedWallMs ?: s.startedWallMs, s.endReason!!, s.snoozeCount, s.demoShortened,
+            actualMs = s.elapsedMs ?: ((s.endedWallMs ?: s.startedWallMs) - s.startedWallMs).coerceAtLeast(0),
+        )
         state = state.copy(session = null, original = null, appSet = VehicleSettings(), history = (state.history + record).takeLast(MAX_HISTORY))
         return record
     }
@@ -153,13 +169,19 @@ class NapEngine(state: NapState = NapState()) {
         }
         val wall = clock.wallMs()
         val mono = clock.monotonicMs()
-        val sameBoot = mono >= s.startedMonoMs
+        val sameBoot = sameBoot(s, clock)
         // 같은 부팅인데 실제 시각과 단조 시계의 차이가 크게 달라졌으면 시각이 바뀐 것
         val clockJumped = sameBoot && kotlin.math.abs((wall - mono) - (s.startedWallMs - s.startedMonoMs)) > CLOCK_JUMP_MS
         var next = s
         if (!sameBoot) {
             // 재부팅: 실제 시각 기준으로 단조 시계 값을 다시 잡는다
-            next = next.copy(startedMonoMs = mono - (wall - s.startedWallMs), targetMonoMs = mono + (s.targetWallMs - wall))
+            next = next.copy(
+                startedMonoMs = mono - (wall - s.startedWallMs), targetMonoMs = mono + (s.targetWallMs - wall),
+                startedBootCount = clock.bootCount(),
+            )
+        } else if (clockJumped) {
+            // 시각만 바뀜: 타이머는 단조 시계 그대로, 표시·비교용 실제 시각을 지금 시계에 맞춘다
+            next = next.copy(startedWallMs = wall - (mono - s.startedMonoMs), targetWallMs = wall + (s.targetMonoMs - mono))
         }
         val left = if (sameBoot) next.targetMonoMs - mono else next.targetWallMs - wall
         if (left <= 0) {
@@ -178,22 +200,46 @@ class NapEngine(state: NapState = NapState()) {
         state = state.copy(original = OriginalVehicleState(s.id, settings, clock.wallMs()))
     }
 
+    /** 이 세션에 아직 제어 요청을 보내도 되는지(끝난 휴식의 준비·복구를 차량에 보내지 않게) */
+    fun acceptsControl(sessionId: String, isRestore: Boolean): Boolean {
+        val s = state.session ?: return false
+        if (s.id != sessionId) return false
+        return if (isRestore) s.status == NapStatus.RESTORE_PENDING else s.status in setOf(NapStatus.RESTING, NapStatus.SNOOZED, NapStatus.RINGING)
+    }
+
     /**
-     * 제어 요청 결과를 남긴다. 다른 세션(이미 끝난 휴식)의 늦은 응답은 버린다.
-     * 휴식 준비 요청이 모의 적용되면 [NapState.appSet] 에 반영한다(복구 후보 판단용).
+     * 제어 요청을 차량에 보내기 **전에** 기록한다. 준비 요청이면 바꾸려는 값을 앱이 바꾼 값으로 미리 적어 둔다 —
+     * 요청 도중 앱이 꺼져도 복구 후보를 잃지 않게(차량 값과 기록이 어긋나지 않게). 실패하면 [completeAction] 이 되돌린다.
      */
-    fun recordAction(sessionId: String, target: ControlTarget, requested: VehicleSettings, result: ControlState, isRestore: Boolean = false, note: String? = null): ControlAction? {
+    fun requestAction(sessionId: String, target: ControlTarget, requested: VehicleSettings, isRestore: Boolean = false, note: String? = null): ControlAction? {
         val s = state.session?.takeIf { it.id == sessionId && it.status != NapStatus.FINISHED } ?: return null
-        val action = ControlAction("act-${state.nextId}", s.id, target, requested.valueOf(target) ?: "-", result, isRestore, note)
-        var appSet = state.appSet
-        if (result == ControlState.ACKNOWLEDGED && !isRestore) {
-            appSet = when (target) {
-                ControlTarget.CLIMATE -> appSet.copy(temperatureC = requested.temperatureC)
-                ControlTarget.SEAT -> appSet.copy(seat = requested.seat)
-            }
-        }
+        val action = ControlAction(
+            "act-${state.nextId}", s.id, target, requested.valueOf(target) ?: "-", ControlState.REQUESTED, isRestore, note,
+            previous = state.appSet,
+        )
+        val appSet = if (isRestore) state.appSet else state.appSet.with(target, requested)
         state = state.copy(actions = state.actions + action, appSet = appSet, nextId = state.nextId + 1)
         return action
+    }
+
+    /** 요청 결과. 끝난 휴식의 늦은 응답은 버린다. 준비 요청이 실패하면 앱이 바꾼 값에서 뺀다. */
+    fun completeAction(actionId: String, result: ControlState): ControlAction? {
+        val action = state.actions.firstOrNull { it.id == actionId && it.state == ControlState.REQUESTED } ?: return null
+        if (state.session?.id != action.sessionId) return null
+        val done = action.copy(state = result)
+        val appSet = if (!action.isRestore && result != ControlState.ACKNOWLEDGED) {
+            state.appSet.with(action.target, action.previous ?: VehicleSettings())
+        } else {
+            state.appSet
+        }
+        state = state.copy(actions = state.actions.map { if (it.id == actionId) done else it }, appSet = appSet)
+        return done
+    }
+
+    /** 요청과 결과를 한 번에 기록(시험·동기 처리용) */
+    fun recordAction(sessionId: String, target: ControlTarget, requested: VehicleSettings, result: ControlState, isRestore: Boolean = false, note: String? = null): ControlAction? {
+        val a = requestAction(sessionId, target, requested, isRestore, note) ?: return null
+        return completeAction(a.id, result)
     }
 
     fun restorePlan(current: VehicleSettings): List<RestoreItem> = RestorePlanner.plan(state.original, state.appSet, current)

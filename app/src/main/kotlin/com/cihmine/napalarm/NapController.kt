@@ -40,8 +40,10 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 import java.time.ZoneId
 
-/** 실제 시계: 경과는 부팅 후 단조 시계, 비교용 실제 시각 */
-object SystemNapClock : Clock {
+/** 실제 시계: 경과는 부팅 후 단조 시계, 비교용 실제 시각, 같은 부팅 판단용 부팅 횟수 */
+class SystemNapClock(private val app: Application) : Clock {
+    override fun bootCount(): Int =
+        runCatching { android.provider.Settings.Global.getInt(app.contentResolver, android.provider.Settings.Global.BOOT_COUNT) }.getOrDefault(-1)
     override fun monotonicMs() = SystemClock.elapsedRealtime()
     override fun wallMs() = System.currentTimeMillis()
 }
@@ -71,7 +73,7 @@ data class NapUi(
  * 화면이 다시 그려져도 타이머를 새로 시작하지 않는다(시작·목표 시각은 저장 상태에 있다).
  */
 class NapController(app: Application) : AndroidViewModel(app) {
-    private val clock: Clock = SystemNapClock
+    private val clock: Clock = SystemNapClock(app)
     private val zone: ZoneId = ZoneId.systemDefault()
     private val store = JsonFileStore(app.filesDir, "nap_state.json", NapCodec::encode, NapCodec::decode)
     private val carStore = JsonFileStore(app.filesDir, "mock_car.json",
@@ -92,6 +94,12 @@ class NapController(app: Application) : AndroidViewModel(app) {
     private var ticker: Job? = null
     private var reservationDone = false
 
+    /** 진행 중인 모의 제어 요청. 휴식이 끝나거나 새로 시작하면 취소한다. */
+    private val controlJobs = mutableListOf<Job>()
+
+    /** 음성 인식 요청 번호. 상태가 바뀌면 올려서 늦게 온 결과를 버린다. */
+    private var listenToken = 0
+
     init {
         _ui.update { it.copy(ttsEngine = tts.engineName, sttEngine = stt.engineName) }
         val message = when (engine.onAppRestarted(clock)) {
@@ -111,10 +119,27 @@ class NapController(app: Application) : AndroidViewModel(app) {
 
     /** 저장을 끝낸 뒤 화면에 반영한다. */
     private fun commit(message: String? = null) {
-        runCatching { store.save(engine.state) }.onFailure {
-            _ui.update { u -> u.copy(message = "저장 실패 — 앱을 다시 켜면 휴식이 이어지지 않을 수 있어요") }
-        }
-        _ui.update { it.copy(nap = engine.state, remainingMs = engine.remainingMs(clock), message = message ?: it.message) }
+        val saved = runCatching { store.save(engine.state) }.isSuccess
+        // 저장에 실패하면 성공 안내로 덮지 않는다.
+        val shown = if (saved) message else "저장 실패 — 앱을 다시 켜면 휴식이 이어지지 않을 수 있어요"
+        _ui.update { it.copy(nap = engine.state, remainingMs = engine.remainingMs(clock), message = shown ?: it.message) }
+    }
+
+    private fun launchControl(block: suspend () -> Unit) {
+        controlJobs.removeAll { !it.isActive }
+        controlJobs += viewModelScope.launch { block() }
+    }
+
+    private fun cancelControls() {
+        controlJobs.forEach { it.cancel() }
+        controlJobs.clear()
+    }
+
+    /** 상태가 바뀔 때 듣던 음성 인식을 끊고 늦은 결과를 버린다. */
+    private fun stopListening() {
+        listenToken++
+        stt.cancel()
+        _ui.update { it.copy(listening = false) }
     }
 
     private fun startTicker() {
@@ -133,6 +158,8 @@ class NapController(app: Application) : AndroidViewModel(app) {
     }
 
     private fun onRing(e: TickEvent.Ring) {
+        // 듣는 중이었으면 마이크를 닫고 울린다(알람·안내가 인식과 겹치지 않게).
+        stopListening()
         commit(if (e.sequence == 1) "휴식 시간이 끝났어요" else "다시 알림 시간이 됐어요")
         alarm.start()
         if (_ui.value.ttsReady) tts.speak(Texts.ALARM, 100) {}
@@ -159,30 +186,45 @@ class NapController(app: Application) : AndroidViewModel(app) {
     fun startRest(demo20s: Boolean = false) {
         if (!_ui.value.controlAllowed) return commit("주차 상태에서만 휴식을 시작할 수 있어요")
         val seconds = if (demo20s) 20L else engine.state.prefs.lastMinutes * 60L
+        cancelControls()
+        stopListening()
         val session = engine.start(seconds, clock, demoShortened = demo20s) ?: return
         engine.recordOriginal(car.read(), clock)
         reservationDone = false
         _ui.update { it.copy(pendingMinutes = null, phoneReservation = false) }
         commit(if (demo20s) "시연용 20초 타이머(시간 단축)" else "${Texts.clock(session.targetWallMs, zone)}에 알려 드릴게요")
         val prefs = engine.state.prefs
-        viewModelScope.launch {
+        launchControl {
             control(session.id, ControlTarget.CLIMATE, VehicleSettings(temperatureC = prefs.temperatureC))
             control(session.id, ControlTarget.SEAT, VehicleSettings(seat = prefs.seatPreset))
         }
     }
 
-    /** 모의 제어 요청 하나. 주차가 아니면 요청하지 않고, 3초 안에 응답이 없으면 응답 없음으로 기록한다. */
+    /**
+     * 모의 제어 요청 하나. 끝난 휴식이면 보내지 않고, 주차가 아니면 막는다. 요청을 보내기 전에 기록·저장하고
+     * (도중에 꺼져도 앱이 바꾸려던 값을 잃지 않게), 차량이 값을 바꾸기 직전에도 주차 상태를 다시 확인한다.
+     */
     private suspend fun control(sessionId: String, target: ControlTarget, value: VehicleSettings, isRestore: Boolean = false, note: String? = null) {
-        val result = if (!_ui.value.controlAllowed) ControlState.BLOCKED
-        else withTimeoutOrNull(3_000) { car.request(target, value) } ?: ControlState.TIMED_OUT
-        // 끝난 세션의 늦은 응답은 엔진이 버린다
-        if (engine.recordAction(sessionId, target, value, result, isRestore, note) != null) commit()
+        if (!engine.acceptsControl(sessionId, isRestore)) return
+        val action = engine.requestAction(sessionId, target, value, isRestore, note) ?: return
+        commit()
+        val result = try {
+            if (!_ui.value.controlAllowed) ControlState.BLOCKED
+            else withTimeoutOrNull(3_000) { car.request(target, value) { _ui.value.controlAllowed && engine.acceptsControl(sessionId, isRestore) } }
+                ?: ControlState.TIMED_OUT
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            // 휴식이 끝나 취소됨: 차량 값은 바뀌지 않았으므로 앱이 바꾼 값에서도 뺀다
+            if (engine.completeAction(action.id, ControlState.CANCELLED) != null) commit()
+            throw e
+        }
+        if (engine.completeAction(action.id, result) != null) commit()
     }
 
     // ── 알람·종료 ─────────────────────────────────────────
 
     fun snooze() {
         if (engine.snooze(clock) == null) return
+        stopListening()
         alarm.stop()
         tts.stop()
         commit("${engine.state.prefs.snoozeMinutes}분 뒤 다시 알려 드릴게요")
@@ -190,6 +232,8 @@ class NapController(app: Application) : AndroidViewModel(app) {
 
     fun wake() {
         if (!engine.wake(clock)) return
+        cancelControls()
+        stopListening()
         alarm.stop()
         tts.stop()
         refreshRestorePlan()
@@ -198,6 +242,8 @@ class NapController(app: Application) : AndroidViewModel(app) {
 
     fun stopEarly() {
         if (!engine.stopEarly(clock)) return
+        cancelControls()
+        stopListening()
         alarm.stop()
         refreshRestorePlan()
         commit("휴식을 끝냈어요")
@@ -218,8 +264,8 @@ class NapController(app: Application) : AndroidViewModel(app) {
     fun restore(item: RestoreItem) {
         val s = engine.session?.takeIf { it.status == NapStatus.RESTORE_PENDING } ?: return
         val original = engine.state.original?.settings ?: return
-        if (item.decision == RestoreDecision.NOTHING_TO_DO) return
-        viewModelScope.launch {
+        if (item.decision != RestoreDecision.RESTORE && item.decision != RestoreDecision.CONFIRM_MANUAL_CHANGE) return
+        launchControl {
             control(s.id, item.target, original, isRestore = true)
             refreshRestorePlan()
         }
@@ -227,6 +273,8 @@ class NapController(app: Application) : AndroidViewModel(app) {
 
     fun finishRestore() {
         engine.finish() ?: return
+        cancelControls()
+        stopListening()
         _ui.update { it.copy(restorePlan = emptyList()) }
         commit("기록에 남겼어요")
     }
@@ -237,15 +285,22 @@ class NapController(app: Application) : AndroidViewModel(app) {
         if (!_ui.value.micGranted || !_ui.value.sttAvailable) return commit("음성 인식을 쓸 수 없어요 — 버튼을 써 주세요")
         alarm.stop()
         tts.stop()
+        // 들을 때의 요청 번호·세션·상태를 기억해 두고, 그사이 상태가 바뀌었으면 결과를 버린다.
+        val token = ++listenToken
+        val sessionId = engine.session?.id
+        val status = engine.session?.status
+        fun stale() = token != listenToken || engine.session?.id != sessionId || engine.session?.status != status
         _ui.update { it.copy(listening = true) }
         stt.listen(object : SpeechInput.Listener {
             override fun onSpeechStart() = Unit
             override fun onResult(candidates: List<String>) {
+                if (stale()) return
                 _ui.update { it.copy(listening = false) }
                 onUtterance(candidates.firstOrNull().orEmpty())
             }
 
             override fun onError(error: SpeechError) {
+                if (stale()) return
                 _ui.update { it.copy(listening = false, message = "잘 못 들었어요(${error.name})") }
                 if (engine.session?.status == NapStatus.RINGING) alarm.start()
             }
@@ -317,8 +372,13 @@ class NapController(app: Application) : AndroidViewModel(app) {
         if (left > 10 * 60_000L) return
         reservationDone = true
         val original = engine.state.original?.settings?.temperatureC ?: return
+        // 복구 규칙과 같게: 앱이 바꾼 공조이고 그 뒤 아무도 안 바꿨을 때만 원래 온도로 돌린다(수동 변경은 덮어쓰지 않음).
+        val climate = engine.restorePlan(car.read()).first { it.target == ControlTarget.CLIMATE }
+        if (climate.decision != RestoreDecision.RESTORE) {
+            return commit("휴대폰 예약: ${climate.decision.label} — 공조를 바꾸지 않았어요")
+        }
         // 앱이 바꾼 값으로 기록해야 복구 화면에서 "직접 바꾼 값"으로 오인하지 않는다.
-        viewModelScope.launch { control(s.id, ControlTarget.CLIMATE, VehicleSettings(temperatureC = original), note = "휴대폰 예약(모의)") }
+        launchControl { control(s.id, ControlTarget.CLIMATE, VehicleSettings(temperatureC = original), note = "휴대폰 예약(모의)") }
     }
 
     fun time(wallMs: Long) = Texts.clock(wallMs, zone)

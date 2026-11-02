@@ -9,6 +9,8 @@ import kotlinx.serialization.json.Json
  * [wallMs] 는 실제 시각(재시작·재부팅 뒤 비교용).
  */
 interface Clock {
+    /** 부팅 횟수(같은 부팅인지 판단). 모르면 -1 */
+    fun bootCount(): Int
     fun monotonicMs(): Long
     fun wallMs(): Long
 }
@@ -49,6 +51,8 @@ data class NapSession(
     val requestedSeconds: Long,
     val startedWallMs: Long,
     val startedMonoMs: Long,
+    /** 시작할 때의 부팅 횟수(-1 = 모름) */
+    val startedBootCount: Int = -1,
     /** 목표 시각(실제 시각). 재시작 뒤 비교에 쓴다. */
     val targetWallMs: Long,
     /** 목표 시각(단조 시계). 같은 부팅 안에서는 이 값을 우선 쓴다. */
@@ -58,6 +62,8 @@ data class NapSession(
     /** 지금까지 울린 알람 번호(0 = 아직 없음). 같은 번호는 한 번만 울린다. */
     val alarmSequence: Int = 0,
     val endedWallMs: Long? = null,
+    /** 끝날 때까지의 실제 경과(ms). 같은 부팅이면 단조 시계로 재서 시스템 시각 변경에 흔들리지 않는다. */
+    val elapsedMs: Long? = null,
     val endReason: EndReason? = null,
     /** 시연용 단축 타이머(20초 등)인지 — 화면·기록에 표시한다 */
     val demoShortened: Boolean = false,
@@ -75,6 +81,8 @@ data class NapRecord(
     val endReason: EndReason,
     val snoozeCount: Int,
     val demoShortened: Boolean,
+    /** 실제 앱 세션 시간(ms). 시스템 시각을 바꿔도 왜곡되지 않게 경과 시간으로 잰다. */
+    val actualMs: Long = 0,
 )
 
 /** 사용자 휴식 설정 */

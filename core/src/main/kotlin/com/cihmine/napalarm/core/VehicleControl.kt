@@ -19,6 +19,9 @@ enum class ControlState(val label: String) {
     FAILED("실패"),
     TIMED_OUT("응답 없음"),
 
+    /** 휴식이 끝나 요청을 거둠(차량 값은 바꾸지 않음) */
+    CANCELLED("취소됨(휴식 끝남)"),
+
     /** 주행 중·상태 불명이라 요청하지 않음 */
     BLOCKED("차단됨(주차 상태 아님)"),
 }
@@ -29,6 +32,12 @@ data class VehicleSettings(val temperatureC: Double? = null, val seat: SeatPrese
     fun valueOf(target: ControlTarget): String? = when (target) {
         ControlTarget.CLIMATE -> temperatureC?.let { "%.1f℃".format(it) }
         ControlTarget.SEAT -> seat?.label
+    }
+
+    /** [target] 항목만 [other] 의 값으로 바꾼 설정 */
+    fun with(target: ControlTarget, other: VehicleSettings): VehicleSettings = when (target) {
+        ControlTarget.CLIMATE -> copy(temperatureC = other.temperatureC)
+        ControlTarget.SEAT -> copy(seat = other.seat)
     }
 }
 
@@ -43,6 +52,8 @@ data class ControlAction(
     /** 복구 요청인지(휴식 준비가 아니라 원래대로 되돌리기) */
     val isRestore: Boolean = false,
     val note: String? = null,
+    /** 요청 직전의 앱이 바꾼 값(실패 시 되돌리기용) */
+    val previous: VehicleSettings? = null,
 )
 
 /** 휴식 시작 전에 읽은 원래 설정. 읽지 못한 항목은 null 이고 복구 대상이 아니다. */
@@ -60,6 +71,9 @@ enum class RestoreDecision(val label: String) {
 
     /** 휴식 중 사용자가 직접 바꿈 → 덮어쓰지 않고 확인 */
     CONFIRM_MANUAL_CHANGE("직접 바꾼 값이 있어요 — 확인 필요"),
+
+    /** 이미 원래 값과 같음(복구 완료 또는 사용자가 되돌림) */
+    ALREADY_RESTORED("이미 원래 값이에요"),
 
     /** 앱이 바꾸지 않았거나 원래 값을 읽지 못함 */
     NOTHING_TO_DO("되돌릴 것 없음"),
@@ -84,9 +98,10 @@ object RestorePlanner {
             val a = appSet.valueOf(t)
             val c = current.valueOf(t)
             val decision = when {
-                o == null || a == null -> RestoreDecision.NOTHING_TO_DO
+                // 앱이 바꾸지 않았음(원래 값을 못 읽었거나, 원래 값과 같은 값을 요청)
+                o == null || a == null || o == a -> RestoreDecision.NOTHING_TO_DO
+                c == o -> RestoreDecision.ALREADY_RESTORED
                 c != a -> RestoreDecision.CONFIRM_MANUAL_CHANGE
-                o == a -> RestoreDecision.NOTHING_TO_DO
                 else -> RestoreDecision.RESTORE
             }
             RestoreItem(t, o, a, c, decision)

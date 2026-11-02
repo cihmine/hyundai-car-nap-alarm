@@ -164,7 +164,7 @@ private fun Resting(ui: NapUi, c: NapController) {
     Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
         Text(if (s.status == NapStatus.SNOOZED) "다시 알림 대기 중" else "휴식 중", fontSize = 24.sp, color = Color.Gray)
         Text(Texts.remaining(ui.remainingMs ?: 0), fontSize = 120.sp, fontWeight = FontWeight.Light, color = Color(0xFFB0B0C0))
-        Text("${c.time(s.targetWallMs)}에 알려 드려요${if (s.demoShortened) " · 시연용 시간 단축" else ""}", fontSize = 20.sp, color = Color.Gray)
+        Text("${c.time(System.currentTimeMillis() + (ui.remainingMs ?: 0))}에 알려 드려요${if (s.demoShortened) " · 시연용 시간 단축" else ""}", fontSize = 20.sp, color = Color.Gray)
         if (s.needsReconfirm) {
             Box(Modifier.background(Panel, RoundedCornerShape(12.dp)).padding(16.dp)) {
                 Column {
@@ -223,7 +223,7 @@ private fun Restore(ui: NapUi, c: NapController) {
                 when (item.decision) {
                     RestoreDecision.RESTORE -> Button(onClick = { c.restore(item) }, enabled = ui.controlAllowed) { Text("되돌리기") }
                     RestoreDecision.CONFIRM_MANUAL_CHANGE -> OutlinedButton(onClick = { c.restore(item) }, enabled = ui.controlAllowed) { Text("그래도 원래 값으로") }
-                    RestoreDecision.NOTHING_TO_DO -> Unit
+                    RestoreDecision.NOTHING_TO_DO, RestoreDecision.ALREADY_RESTORED -> Unit
                 }
             }
         }
@@ -244,7 +244,7 @@ private fun History(ui: NapUi, c: NapController) {
         HorizontalDivider()
         Text("최근 기록(앱 세션 시간 — 수면 시간 측정 아님)", fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
         list.forEach { r ->
-            val actual = (r.endedWallMs - r.startedWallMs) / 1000
+            val actual = r.actualMs / 1000
             Text("${c.time(r.startedWallMs)} · 계획 ${Texts.duration(r.requestedSeconds)} · 실제 ${Texts.duration(actual)} · ${r.endReason.label}" +
                 (if (r.snoozeCount > 0) " · 다시 알림 ${r.snoozeCount}번" else "") + (if (r.demoShortened) " · 시연 단축" else ""), fontSize = 15.sp, color = Color.LightGray)
         }

@@ -23,8 +23,11 @@ interface VehicleControl {
     val isSimulated: Boolean
     fun read(): VehicleSettings
 
-    /** 요청 결과. ACKNOWLEDGED 는 요청 접수 응답이며 물리 적용 확인이 아니다. */
-    suspend fun request(target: ControlTarget, value: VehicleSettings): ControlState
+    /**
+     * 요청 결과. ACKNOWLEDGED 는 요청 접수 응답이며 물리 적용 확인이 아니다.
+     * 값을 바꾸기 직전에 [stillAllowed] 를 다시 확인한다(대기 중 주행·휴식 종료로 바뀌면 바꾸지 않음).
+     */
+    suspend fun request(target: ControlTarget, value: VehicleSettings, stillAllowed: () -> Boolean): ControlState
 }
 
 /** 시연 패널에서 바꾸는 모의 차량 설정·실패 옵션 */
@@ -49,7 +52,7 @@ class MockCar(initial: MockCarState, private val onChange: (MockCarState) -> Uni
 
     override fun read(): VehicleSettings = state.settings
 
-    override suspend fun request(target: ControlTarget, value: VehicleSettings): ControlState {
+    override suspend fun request(target: ControlTarget, value: VehicleSettings, stillAllowed: () -> Boolean): ControlState {
         delay(700) // 차량 응답을 기다리는 것처럼
         if (state.noResponse) {
             delay(5_000)
@@ -57,6 +60,7 @@ class MockCar(initial: MockCarState, private val onChange: (MockCarState) -> Uni
         }
         val fail = if (target == ControlTarget.CLIMATE) state.failClimate else state.failSeat
         if (fail) return ControlState.FAILED
+        if (!stillAllowed()) return ControlState.BLOCKED
         update {
             copy(
                 settings = when (target) {

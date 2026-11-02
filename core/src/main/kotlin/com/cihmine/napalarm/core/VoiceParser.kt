@@ -28,6 +28,8 @@ object VoiceParser {
     private fun norm(s: String) = s.replace(Regex("[\\s.,!?~]"), "")
 
     fun parse(text: String): Utterance {
+        // "1.5분"의 마침표를 지우면 15분이 된다 — 소수 시간은 다른 정수로 바꾸지 않고 거절한다.
+        if (Regex("\\d\\s*[.,]\\s*\\d").containsMatchIn(text)) return Utterance.Unknown
         val t = norm(text)
         if (t.isEmpty()) return Utterance.Unknown
         COMMANDS[t]?.let { return Utterance.Command(it) }

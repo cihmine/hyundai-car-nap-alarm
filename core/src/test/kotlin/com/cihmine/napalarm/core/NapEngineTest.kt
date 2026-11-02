@@ -11,7 +11,8 @@ import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 /** 시험용 시계. 단조 시계와 실제 시각을 따로 움직일 수 있다. */
-class FakeClock(var mono: Long = 1_000_000, var wall: Long = 1_762_000_000_000) : Clock {
+class FakeClock(var mono: Long = 1_000_000, var wall: Long = 1_762_000_000_000, var boot: Int = 1) : Clock {
+    override fun bootCount() = boot
     override fun monotonicMs() = mono
     override fun wallMs() = wall
     fun advance(ms: Long) { mono += ms; wall += ms }
