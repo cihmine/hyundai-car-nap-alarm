@@ -86,12 +86,33 @@ object Texts {
     fun confirmDuration(minutes: Int, nowWallMs: Long, zone: ZoneId): String =
         "${duration(minutes * 60L)} 뒤, ${clock(nowWallMs + minutes * 60_000L, zone)}에 알려 드릴까요?"
 
+    /** 분(소수) → "12시간", "6시간 30분", "3분", "1분 미만" */
+    fun durationMinutes(minutes: Double): String {
+        if (minutes < 1) return "1분 미만"
+        val m = Math.round(minutes)
+        return when {
+            m < 60 -> "${m}분"
+            m % 60 == 0L -> "${m / 60}시간"
+            else -> "${m / 60}시간 ${m % 60}분"
+        }
+    }
+
     fun remaining(ms: Long): String {
         val total = (ms + 999) / 1000
         return "%d:%02d".format(total / 60, total % 60)
     }
 
-    const val ALARM = "설정한 휴식 시간이 끝났어요. 일어나셨으면 '일어났어', 더 쉬려면 '5분 더'라고 말해 주세요."
+    fun alarmSpeech(reason: AlarmReason): String = when (reason) {
+        AlarmReason.WAKE_TIME -> ALARM
+        AlarmReason.ENERGY_WARNING -> "배터리가 정해 둔 보존량에 가까워요. 곧 장치를 꺼요. 일어나셨으면 '일어났어'라고 말해 주세요."
+        AlarmReason.ENERGY_SHED -> "배터리가 보존량에 닿아 정해 둔 장치를 꺼요. 일어나셨으면 '일어났어'라고 말해 주세요."
+        AlarmReason.STARTER_WARNING -> "차량이 12볼트 배터리 경고를 보냈어요. 일어나셨으면 '일어났어'라고 말해 주세요."
+    }
+
+    fun protectionBeforeWake(minutes: Double): String =
+        "현재 소비 기준으로 약 ${durationMinutes(minutes)} 뒤 전력 보존량에 닿아요 — 기상 시각보다 빨라요. 그 전에 먼저 깨워 드릴게요."
+
+    const val ALARM ="설정한 휴식 시간이 끝났어요. 일어나셨으면 '일어났어', 더 쉬려면 '5분 더'라고 말해 주세요."
     const val OVERDUE = "예정된 알람 시각이 지났어요. 앱이 꺼져 있어 알람이 울리지 않았어요."
     const val NOT_GUARANTEE = "이 앱은 기상이나 차 안 체류 안전을 보장하는 장치가 아니에요. 앱이 켜져 있고 차량 시스템이 깨어 있을 때만 알람이 울려요."
 }

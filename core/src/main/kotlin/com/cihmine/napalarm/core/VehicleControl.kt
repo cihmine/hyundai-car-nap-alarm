@@ -77,6 +77,9 @@ enum class RestoreDecision(val label: String) {
 
     /** 앱이 바꾸지 않았거나 원래 값을 읽지 못함 */
     NOTHING_TO_DO("되돌릴 것 없음"),
+
+    /** 전력 보호로 끈 장치 — 자동으로 다시 켜지 않는다. 필요하면 전원을 확인하고 새로 시작한다. */
+    BLOCKED_BY_PROTECTION("전력 보호로 종료됨 — 자동으로 다시 켜지 않아요"),
 }
 
 data class RestoreItem(
@@ -92,12 +95,18 @@ data class RestoreItem(
  * 휴식 중 사용자가 바꾼 항목은 덮어쓰지 않고 확인한다.
  */
 object RestorePlanner {
-    fun plan(original: OriginalVehicleState?, appSet: VehicleSettings, current: VehicleSettings): List<RestoreItem> =
+    fun plan(
+        original: OriginalVehicleState?,
+        appSet: VehicleSettings,
+        current: VehicleSettings,
+        protectedTargets: Set<ControlTarget> = emptySet(),
+    ): List<RestoreItem> =
         ControlTarget.entries.map { t ->
             val o = original?.settings?.valueOf(t)
             val a = appSet.valueOf(t)
             val c = current.valueOf(t)
             val decision = when {
+                t in protectedTargets -> RestoreDecision.BLOCKED_BY_PROTECTION
                 // 앱이 바꾸지 않았음(원래 값을 못 읽었거나, 원래 값과 같은 값을 요청)
                 o == null || a == null || o == a -> RestoreDecision.NOTHING_TO_DO
                 c == o -> RestoreDecision.ALREADY_RESTORED

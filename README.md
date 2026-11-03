@@ -1,10 +1,33 @@
 # 낮잠 알람 (가칭)
 
-주차한 차에서 잠깐 쉴 때 휴식 시간을 정하고, 시간이 되면 깨워 주고 차량 설정 복구를 돕는 앱입니다. Pleos Connect용으로 개발합니다.
+**주차한 차에서 쉬는 동안 기상 시각에 깨워 주고, 배터리가 정해 둔 보존량에 닿기 전에 먼저 깨워 장치를 꺼 주는 앱**입니다. 전기차와 내연기관차(+캠핑 배터리)를 하나의 앱으로 지원합니다. Pleos Connect용.
 
 > 현대자동차그룹 차량용 앱 개발 공모전 출품작 · 시제품
 
-**공조·시트는 모의 차량으로만 동작합니다.** 화면 상단에 항상 "차량 연동 시뮬레이션"을 표시하며, 실제 차량 제어 어댑터는 이 빌드에 없습니다. 경적·원격 시동은 구현하지 않았습니다. 이 앱은 기상이나 차 안 체류 안전을 보장하는 장치가 아니며, 앱이 켜져 있고 차량 시스템이 깨어 있을 때만 알람이 울립니다.
+## 30초 체험
+
+1. APK 를 설치하고 앱을 엽니다(Pleos Connect 에뮬레이터 또는 Android Automotive).
+2. 오른쪽 **시연 패널 → "장면 1 · 전기차 전력 보호"** 를 누릅니다. 나머지는 자동으로 진행되며, 화면 맨 위 노란 띠가 지금 단계를 설명합니다.
+   - 소비 1.5kW → **남은 시간 12시간**, 공조를 세게(3kW) → **6시간** (계산식이 화면에 그대로 나옴)
+   - 보존량 근처로 이동(시간 단축) → **기상 시각보다 먼저 알람**
+   - 배터리 소모 30배속 → 보존량 30%에 닿으면 **모의 공조 종료**, '5분 더'를 눌러도 한도는 그대로
+   - '휴식 끝내기' → 복구 화면: 공조는 **"전력 보호로 종료됨 — 자동으로 다시 켜지 않아요"**, 시트만 되돌리기
+3. **장면 2**(내연기관차 + 캠핑 배터리: 800Wh·조명 100W → 6시간 → 모의 조명 종료), **장면 3**(12V 만 있는 차: **"계산 불가"**, 그래도 20초 뒤 알람)도 같은 방식입니다.
+
+모든 전원 값·장치는 **모의**이며 화면에 그렇게 표시합니다. 계산 자체는 실제로 합니다.
+
+## 코드 지도
+
+| 파일 | 하는 일 |
+|---|---|
+| [`core/.../Energy.kt`](core/src/main/kotlin/com/cihmine/napalarm/core/Energy.kt) | 전원 3종, **남은 사용 시간 계산**(RuntimeEstimator), **전력 보호 판단**(EnergyGuard) — 파일 맨 위에 흐름 그림 |
+| [`core/.../NapEngine.kt`](core/src/main/kotlin/com/cihmine/napalarm/core/NapEngine.kt) | 휴식 타이머 상태 전이(휴식 → 알람 → 다시 알림 → 복구), 재시작 복원, 전력 감시 연결 |
+| [`core/.../VehicleControl.kt`](core/src/main/kotlin/com/cihmine/napalarm/core/VehicleControl.kt) | 공조·시트 요청 상태, **복구 규칙**(앱이 바꾼 것만, 직접 바꾼 값·보호로 끈 장치는 건드리지 않음) |
+| [`core/src/test/.../EnergyTest.kt`](core/src/test/kotlin/com/cihmine/napalarm/core/EnergyTest.kt) | 계획서 검증 사례 N-T11~N-T18 (테스트 이름이 곧 규칙) |
+| [`app/.../NapController.kt`](app/src/main/kotlin/com/cihmine/napalarm/NapController.kt) | 화면·소리·모의 장치를 잇는 흐름, 시연 장면 1~3 |
+| [`app/.../vehicle/MockEnergy.kt`](app/src/main/kotlin/com/cihmine/napalarm/vehicle/MockEnergy.kt) | 모의 전원(전기차·캠핑·12V)과 모의 장치 종료 |
+
+**공조·시트·전원(배터리 값)·편의 장치는 모의로만 동작합니다.** 화면 상단에 항상 "차량 연동 시뮬레이션"을 표시하며, 실제 차량 제어 어댑터는 이 빌드에 없습니다. 경적·원격 시동은 구현하지 않았습니다. 이 앱은 기상이나 차 안 체류 안전을 보장하는 장치가 아니며, 앱이 켜져 있고 차량 시스템이 깨어 있을 때만 알람이 울립니다.
 
 ## 무엇이 실제로 동작하나
 
@@ -20,6 +43,10 @@
 | 원래 설정 복구 — 앱이 바꾼 항목만, 사용자가 직접 바꾼 값은 덮어쓰지 않고 확인 | 규칙은 실제, 차량은 모의 |
 | 휴대폰 "10분 전 준비" 예약 | 모의 이벤트 |
 | 기록(계획 시간·실제 앱 세션 시간·종료 사유) — 수면 측정 아님 | 실제 |
+| 차량·전원 구성 선택(전기차 / 내연기관차 / 내연기관차 + 캠핑 배터리), 남길 배터리 설정 | 실제 |
+| 남은 장치 사용 시간 계산과 계산식 표시, 데이터 끊김·충전 중·소비 0 처리 | 계산은 실제, 전원 값은 모의 |
+| 보호 기준 10분 전 먼저 깨우기, 보존량 도달 시 장치 종료·결과 확인(실패·응답 없음 구분) | 규칙은 실제, 장치는 모의 |
+| 12V 시동 배터리 — 남은 시간 "계산 불가", 차량 경고 신호만 알림 | 규칙은 실제, 신호는 모의 |
 
 자세한 범위는 [`docs/IMPLEMENTATION_STATUS.md`](docs/IMPLEMENTATION_STATUS.md), 검증 결과는 [`docs/TEST_REPORT.md`](docs/TEST_REPORT.md).
 
@@ -27,7 +54,8 @@
 
 ```
 core/            순수 Kotlin — NapEngine(타이머 상태 전이·재시작 복원), VehicleControl(제어 요청·복구 규칙), VoiceParser(음성 시간·명령), Texts
-core/src/test/   계획서 검증 사례 N-T01~N-T09 단위 테스트(가짜 시계로 시간·재부팅·시각 변경 재현)
+core/            Energy(전원·남은 시간·전력 보호)
+core/src/test/   계획서 검증 사례 N-T01~N-T18 단위 테스트 35개(가짜 시계로 시간·재부팅·시각 변경 재현)
 app/             Compose 화면, 저장(원자적 JSON), 알람 소리, Pleos/기기 음성, 모의 차량(MockCar), 시연 패널
 ```
 
@@ -53,6 +81,7 @@ app/             Compose 화면, 저장(원자적 JSON), 알람 소리, Pleos/�
 | 파일 | 내용 |
 |---|---|
 | [`docs/PLAN.md`](docs/PLAN.md) | 개발 계획서 — 구현 범위(P0/P1), 사용자 흐름, 상태·데이터 모델, 검증 사례 |
+| [`docs/DECISIONS.md`](docs/DECISIONS.md) | 계획서에서 정하지 않은 값(12V·보존량·10분 전 등)과 근거 |
 | [`docs/IMPLEMENTATION_STATUS.md`](docs/IMPLEMENTATION_STATUS.md) | 기능별 구현 상태와 한계 |
 | [`docs/TEST_REPORT.md`](docs/TEST_REPORT.md) | 검증 사례별 결과 |
 | [`docs/COMMON.md`](docs/COMMON.md) | 세 앱 공통 개발·빌드·검증 원칙, 일정, release 절차 |

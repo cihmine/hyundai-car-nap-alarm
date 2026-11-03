@@ -67,9 +67,19 @@ data class NapSession(
     val endReason: EndReason? = null,
     /** 시연용 단축 타이머(20초 등)인지 — 화면·기록에 표시한다 */
     val demoShortened: Boolean = false,
+    /** 지금(마지막) 알람이 왜 울렸는지 — 기상 시각 / 전력 보호 */
+    val alarmReason: AlarmReason = AlarmReason.WAKE_TIME,
     /** 재부팅·시각 변경 등으로 일정을 사용자에게 다시 확인해야 함 */
     val needsReconfirm: Boolean = false,
 )
+
+@Serializable
+enum class AlarmReason(val title: String) {
+    WAKE_TIME("휴식 시간이 끝났어요"),
+    ENERGY_WARNING("전력 보호 기준이 가까워요"),
+    ENERGY_SHED("전력 보호 기준에 도달했어요"),
+    STARTER_WARNING("차량이 12V 배터리 경고를 보냈어요"),
+}
 
 /** 끝난 휴식 기록. 수면 시간이 아니라 앱 세션 시간이다. */
 @Serializable
@@ -83,6 +93,9 @@ data class NapRecord(
     val demoShortened: Boolean,
     /** 실제 앱 세션 시간(ms). 시스템 시각을 바꿔도 왜곡되지 않게 경과 시간으로 잰다. */
     val actualMs: Long = 0,
+    /** 이번 휴식의 차량·전원 구성과 전력 보호 결과(없으면 null) */
+    val profile: VehicleProfile? = null,
+    val guardOutcome: GuardStatus? = null,
 )
 
 /** 사용자 휴식 설정 */
@@ -92,6 +105,8 @@ data class RestPreferences(
     val seatPreset: SeatPreset = SeatPreset.RECLINE,
     val snoozeMinutes: Int = 5,
     val lastMinutes: Int = 30,
+    val profile: VehicleProfile = VehicleProfile.EV,
+    val reserve: ReserveSettings = ReserveSettings(),
 )
 
 @Serializable

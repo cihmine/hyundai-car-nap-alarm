@@ -13,6 +13,8 @@ data class NapState(
     val actions: List<ControlAction> = emptyList(),
     val history: List<NapRecord> = emptyList(),
     val nextId: Long = 1,
+    /** 이번 휴식의 전력 보호 상태(기상 타이머와 별개). 휴식이 끝나면 비운다. */
+    val guard: EnergyGuardState? = null,
 ) {
     val active: Boolean get() = session != null && session.status != NapStatus.FINISHED
 }
@@ -23,6 +25,13 @@ sealed interface TickEvent {
     /** 이 세션의 [sequence] 번째 알람을 울린다. 같은 세션·번호는 한 번만 나온다. */
     data class Ring(val sessionId: String, val sequence: Int) : TickEvent
 }
+
+/** 전력 감시 한 번의 결과: 화면에 보일 추정치, 보호 이벤트, (필요하면) 알람 */
+data class EnergyTick(
+    val estimate: RuntimeEstimate,
+    val events: List<GuardEvent> = emptyList(),
+    val ring: TickEvent = TickEvent.None,
+)
 
 /** 재시작 뒤 복원 결과 */
 enum class RestoreOutcome {
@@ -65,7 +74,10 @@ class NapEngine(state: NapState = NapState()) {
             targetWallMs = wall + seconds * 1000, targetMonoMs = mono + seconds * 1000,
             demoShortened = demoShortened,
         )
-        state = state.copy(session = session, nextId = state.nextId + 1, original = null, appSet = VehicleSettings(), actions = emptyList())
+        state = state.copy(
+            session = session, nextId = state.nextId + 1, original = null, appSet = VehicleSettings(), actions = emptyList(),
+            guard = EnergyGuard.start(state.prefs.profile, wall),
+        )
         return session
     }
 
@@ -102,18 +114,74 @@ class NapEngine(state: NapState = NapState()) {
         val s = state.session ?: return TickEvent.None
         if (s.status != NapStatus.RESTING && s.status != NapStatus.SNOOZED) return TickEvent.None
         if ((remainingMs(clock) ?: return TickEvent.None) > 0) return TickEvent.None
-        val next = s.copy(status = NapStatus.RINGING, alarmSequence = s.alarmSequence + 1)
+        return ring(s, AlarmReason.WAKE_TIME)
+    }
+
+    private fun ring(s: NapSession, reason: AlarmReason): TickEvent.Ring {
+        val next = s.copy(status = NapStatus.RINGING, alarmSequence = s.alarmSequence + 1, alarmReason = reason)
         state = state.copy(session = next)
         return TickEvent.Ring(next.id, next.alarmSequence)
     }
 
-    /** 다시 알림. 알람이 울리는 중일 때만. 새 목표 시각을 저장하고 지금 알람은 멈춘다(앱이 소리를 끈다). */
+    // ── 전력 보호 ─────────────────────────────────────────
+
+    /**
+     * 전원 측정값으로 남은 사용 시간을 계산하고 보호 판단을 한 단계 진행한다(주기적으로 부른다).
+     * 먼저 깨우기·장치 종료·12V 경고는 휴식 중이면 알람으로 울린다. 장치 종료 요청은 [EnergyTick.events] 로 앱이 보낸다.
+     */
+    fun energyTick(readings: Map<PowerSource, EnergyReading>, clock: Clock): EnergyTick {
+        val profile = state.guard?.profile ?: state.prefs.profile
+        val reserve = state.prefs.reserve
+        // 관리 전원이 없으면(12V 만 있는 차) 12V 로 "계산 불가" 이유를 보여 준다
+        val source = profile.managed ?: profile.sources.firstOrNull()
+        val estimate = RuntimeEstimator.estimate(source?.let { readings[it] }, source, reserve, clock.wallMs())
+        val s = state.session
+        val g = state.guard
+        if (s == null || s.status == NapStatus.FINISHED || g == null) return EnergyTick(estimate)
+        val starterWarning = PowerSource.STARTER_12V in profile.sources && readings[PowerSource.STARTER_12V]?.vehicleWarning == true
+        val (next, events) = EnergyGuard.step(g, estimate, starterWarning, remainingMs(clock), reserve, clock.wallMs())
+        state = state.copy(guard = next)
+        val canRing = s.status == NapStatus.RESTING || s.status == NapStatus.SNOOZED
+        val reason = when {
+            events.any { it is GuardEvent.RequestShed } -> AlarmReason.ENERGY_SHED
+            events.any { it is GuardEvent.WarnEarly } -> AlarmReason.ENERGY_WARNING
+            events.any { it is GuardEvent.StarterWarning } -> AlarmReason.STARTER_WARNING
+            else -> null
+        }
+        val ringEvent = if (canRing && reason != null) ring(s, reason) else TickEvent.None
+        // 이미 울리는 중에 장치를 끄게 되면 새로 울리지 않고 알람 제목만 바꾼다
+        if (s.status == NapStatus.RINGING && reason == AlarmReason.ENERGY_SHED) state = state.copy(session = s.copy(alarmReason = reason))
+        return EnergyTick(estimate, events, ringEvent)
+    }
+
+    /** 장치 종료 요청 결과(모의 장치 응답). 끝난 휴식이면 버린다. */
+    fun onShedResult(result: ControlState, clock: Clock): GuardStatus? {
+        val g = state.guard ?: return null
+        val next = EnergyGuard.onShedResult(g, result, clock.wallMs())
+        state = state.copy(guard = next)
+        return next.status
+    }
+
+    /** 전력 보호로 끈 장치가 걸린 복구 항목 — 자동으로 다시 켜지 않는다 */
+    private fun protectedTargets(): Set<ControlTarget> {
+        val g = state.guard ?: return emptySet()
+        return if (g.status.shed && Load.EV_CLIMATE in g.shedLoads) setOf(ControlTarget.CLIMATE) else emptySet()
+    }
+
+    /**
+     * 다시 알림. 알람이 울리는 중일 때만. 새 목표 시각을 저장하고 지금 알람은 멈춘다(앱이 소리를 끈다).
+     * 전력 알림을 미룬 경우엔 소리만 미룬다: 원래 기상 시각보다 늦추지 않고, 전력 보호 한도도 그대로다(EnergyGuard 는 따로 돈다).
+     */
     fun snooze(clock: Clock): NapSession? {
         val s = state.session?.takeIf { it.status == NapStatus.RINGING } ?: return null
         val ms = state.prefs.snoozeMinutes * 60_000L
+        val energyAlarm = s.alarmReason != AlarmReason.WAKE_TIME
+        val wall = clock.wallMs() + ms
+        val mono = clock.monotonicMs() + ms
         val next = s.copy(
             status = NapStatus.SNOOZED, snoozeCount = s.snoozeCount + 1,
-            targetWallMs = clock.wallMs() + ms, targetMonoMs = clock.monotonicMs() + ms,
+            targetWallMs = if (energyAlarm) minOf(wall, s.targetWallMs) else wall,
+            targetMonoMs = if (energyAlarm) minOf(mono, s.targetMonoMs) else mono,
         )
         state = state.copy(session = next)
         return next
@@ -144,8 +212,9 @@ class NapEngine(state: NapState = NapState()) {
         val record = NapRecord(
             s.id, s.requestedSeconds, s.startedWallMs, s.endedWallMs ?: s.startedWallMs, s.endReason!!, s.snoozeCount, s.demoShortened,
             actualMs = s.elapsedMs ?: ((s.endedWallMs ?: s.startedWallMs) - s.startedWallMs).coerceAtLeast(0),
+            profile = state.guard?.profile, guardOutcome = state.guard?.status,
         )
-        state = state.copy(session = null, original = null, appSet = VehicleSettings(), history = (state.history + record).takeLast(MAX_HISTORY))
+        state = state.copy(session = null, original = null, appSet = VehicleSettings(), guard = null, history = (state.history + record).takeLast(MAX_HISTORY))
         return record
     }
 
@@ -242,7 +311,7 @@ class NapEngine(state: NapState = NapState()) {
         return completeAction(a.id, result)
     }
 
-    fun restorePlan(current: VehicleSettings): List<RestoreItem> = RestorePlanner.plan(state.original, state.appSet, current)
+    fun restorePlan(current: VehicleSettings): List<RestoreItem> = RestorePlanner.plan(state.original, state.appSet, current, protectedTargets())
 
     companion object {
         const val MIN_SECONDS = 60L

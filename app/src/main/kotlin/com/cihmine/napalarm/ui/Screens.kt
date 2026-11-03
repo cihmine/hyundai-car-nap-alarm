@@ -39,7 +39,11 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.cihmine.napalarm.NapController
 import com.cihmine.napalarm.NapUi
+import com.cihmine.napalarm.core.AlarmReason
 import com.cihmine.napalarm.core.ControlState
+import com.cihmine.napalarm.core.PowerSource
+import com.cihmine.napalarm.core.RuntimeEstimate
+import com.cihmine.napalarm.core.VehicleProfile
 import com.cihmine.napalarm.core.NapStatus
 import com.cihmine.napalarm.core.RestoreDecision
 import com.cihmine.napalarm.core.SeatPreset
@@ -60,12 +64,13 @@ fun NapApp(c: NapController) {
     Surface(Modifier.fillMaxSize(), color = if (dark) Night else Color(0xFF121218), contentColor = Color.White) {
         Column(Modifier.fillMaxSize()) {
             Row(Modifier.fillMaxWidth().background(Banner).padding(horizontal = 16.dp, vertical = 8.dp)) {
-                Text("차량 연동 시뮬레이션 · 공조·시트: 모의 차량 · 차량 상태: 모의 ${ui.vehicle.label}", color = BannerText, fontSize = 15.sp)
+                Text("차량 연동 시뮬레이션 · 공조·시트·전원·장치: 모의 · 차량 상태: 모의 ${ui.vehicle.label}", color = BannerText, fontSize = 15.sp)
                 Spacer(Modifier.weight(1f))
                 Text("음성: ${ui.sttEngine} / ${ui.ttsEngine}", color = BannerText, fontSize = 15.sp)
             }
             Row(Modifier.fillMaxSize()) {
-                Box(Modifier.weight(1f).fillMaxHeight().verticalScroll(rememberScrollState()).padding(24.dp)) {
+                Column(Modifier.weight(1f).fillMaxHeight().verticalScroll(rememberScrollState()).padding(24.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
+                    ui.sceneCaption?.let { SceneCaption(it) }
                     when (status) {
                         null, NapStatus.FINISHED -> Setup(ui, c)
                         NapStatus.RESTING, NapStatus.SNOOZED -> Resting(ui, c)
@@ -74,6 +79,53 @@ fun NapApp(c: NapController) {
                     }
                 }
                 DemoPanel(ui, c)
+            }
+        }
+    }
+}
+
+/** 시연 장면 진행 안내 — 심사자가 지금 무엇을 보고 있는지 */
+@Composable
+private fun SceneCaption(text: String) {
+    Box(Modifier.fillMaxWidth().background(Banner, RoundedCornerShape(12.dp)).padding(16.dp)) {
+        Text("▶ 시연  $text", color = BannerText, fontSize = 19.sp, fontWeight = FontWeight.SemiBold)
+    }
+}
+
+/**
+ * 전원·남은 사용 시간 카드. 계산식을 그대로 보여 주고, 계산할 수 없으면 숫자 대신 이유를 보여 준다.
+ * 12V 시동 배터리는 전압만으로 계산하지 않는다는 점도 여기서 드러낸다.
+ */
+@Composable
+private fun EnergyCard(ui: NapUi, big: Boolean) {
+    val profile = ui.nap.guard?.profile ?: ui.nap.prefs.profile
+    val reserve = ui.nap.prefs.reserve
+    Box(Modifier.fillMaxWidth().background(Panel, RoundedCornerShape(12.dp)).padding(16.dp)) {
+        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text("전력 · ${profile.label}" + (profile.managed?.let { " · 계산 전원: ${it.label}" } ?: ""), fontSize = 17.sp, color = Color.LightGray)
+            when (val e = ui.estimate) {
+                is RuntimeEstimate.Available -> {
+                    if (e.minutes <= 0.0) Text("보존량에 도달했어요 — 남은 사용 시간 없음", fontSize = if (big) 34.sp else 24.sp, fontWeight = FontWeight.Bold, color = Accent)
+                    else Text("장치 사용 가능 예상  ${Texts.durationMinutes(e.minutes)}", fontSize = if (big) 34.sp else 24.sp, fontWeight = FontWeight.Bold, color = Accent)
+                    Text("계산: ${e.formula}", fontSize = 17.sp)
+                    Text("(남은 에너지 − 보존량) ÷ 지금 소비 전력 · 현재 소비 기준 예상${if (e.simulated) " · 모의 입력" else ""}", fontSize = 14.sp, color = Color.Gray)
+                }
+                is RuntimeEstimate.Charging -> Text("충전/전원 공급 중 — 분리 후 다시 계산해요", fontSize = 22.sp, color = Accent)
+                is RuntimeEstimate.NoDrain -> Text("소비 없음 — 시간을 계산하지 않아요", fontSize = 22.sp, color = Accent)
+                is RuntimeEstimate.Unknown -> Text(e.reason.label, fontSize = 22.sp, color = Accent)
+                null -> Text("계산 중…", fontSize = 20.sp)
+            }
+            when (profile.managed) {
+                PowerSource.EV_TRACTION -> Text("보존량: SOC ${reserve.evReserveSoc.toInt()}% 남기기 · 기준 ${reserve.warningLeadMinutes}분 전에 먼저 깨움 · 끌 장치: 모의 공조", fontSize = 15.sp, color = Color.LightGray)
+                PowerSource.CAMPING -> Text("보존량: 캠핑 배터리 ${reserve.campingReserveWh.toInt()}Wh 남기기 · 기준 ${reserve.warningLeadMinutes}분 전에 먼저 깨움 · 끌 장치: 모의 캠핑 조명", fontSize = 15.sp, color = Color.LightGray)
+                else -> Unit
+            }
+            if (PowerSource.STARTER_12V in profile.sources) {
+                Text("12V 시동 배터리: 모의 ${"%.1f".format(ui.energy.starterVoltage)}V · 전압만으로 남은 시간·재시동을 판단하지 않고 차량 경고 신호만 알려요", fontSize = 15.sp, color = Color.LightGray)
+            }
+            ui.nap.guard?.let { g ->
+                Text("전력 보호: ${g.status.simpleLabel}" + if (g.shedLoads.isNotEmpty()) " (${g.shedLoads.joinToString { it.label }})" else "", fontSize = 18.sp,
+                    color = if (g.status.shed || g.warned) Accent else Color(0xFF81C784))
             }
         }
     }
@@ -97,6 +149,7 @@ private fun Setup(ui: NapUi, c: NapController) {
     val prefs = ui.nap.prefs
     Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
         Text("낮잠 알람", fontSize = 34.sp, fontWeight = FontWeight.Bold)
+        Text("주차한 차에서 쉬는 동안 기상 시각에 깨워 주고, 배터리가 정해 둔 보존량에 닿기 전에 먼저 깨워 장치를 꺼 주는 앱", fontSize = 18.sp, color = Color.LightGray)
         Text(if (ui.controlAllowed) "주차 중 · 앱이 켜져 있는 동안 알람이 울려요" else "주차 상태가 아니에요 — 휴식을 시작할 수 없어요",
             fontSize = 18.sp, color = if (ui.controlAllowed) Color.LightGray else Accent)
         Text("휴식 시간", fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
@@ -109,6 +162,27 @@ private fun Setup(ui: NapUi, c: NapController) {
             }
         }
         Text("예상 알람 시각: ${c.time(System.currentTimeMillis() + prefs.lastMinutes * 60_000L)}", fontSize = 20.sp)
+        HorizontalDivider()
+        Text("차량·전원", fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            VehicleProfile.entries.forEach { p -> FilterChip(prefs.profile == p, { c.setProfile(p) }, { Text(p.label, fontSize = 17.sp) }) }
+        }
+        when (prefs.profile.managed) {
+            PowerSource.EV_TRACTION -> Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text("남길 배터리", fontSize = 18.sp)
+                OutlinedButton(onClick = { c.setReserve(prefs.reserve.copy(evReserveSoc = prefs.reserve.evReserveSoc - 5)) }) { Text("−") }
+                Text("SOC ${prefs.reserve.evReserveSoc.toInt()}%", fontSize = 20.sp)
+                OutlinedButton(onClick = { c.setReserve(prefs.reserve.copy(evReserveSoc = prefs.reserve.evReserveSoc + 5)) }) { Text("+") }
+            }
+            PowerSource.CAMPING -> Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text("남길 캠핑 배터리", fontSize = 18.sp)
+                OutlinedButton(onClick = { c.setReserve(prefs.reserve.copy(campingReserveWh = prefs.reserve.campingReserveWh - 50)) }) { Text("−") }
+                Text("${prefs.reserve.campingReserveWh.toInt()}Wh", fontSize = 20.sp)
+                OutlinedButton(onClick = { c.setReserve(prefs.reserve.copy(campingReserveWh = prefs.reserve.campingReserveWh + 50)) }) { Text("+") }
+            }
+            else -> Unit
+        }
+        EnergyCard(ui, big = false)
         HorizontalDivider()
         Text("휴식 설정(모의 차량)", fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -176,6 +250,7 @@ private fun Resting(ui: NapUi, c: NapController) {
                 }
             }
         }
+        EnergyCard(ui, big = true)
         if (!ui.controlAllowed) Text("주차 상태가 아니에요 — 공조·시트 요청을 막았어요", color = Accent, fontSize = 18.sp)
         Actions(ui)
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -191,8 +266,12 @@ private fun Ringing(ui: NapUi, c: NapController) {
     val s = ui.nap.session ?: return
     val overdue = s.status == NapStatus.OVERDUE
     Column(verticalArrangement = Arrangement.spacedBy(20.dp)) {
-        Text(if (overdue) "예정된 알람 시각이 지났어요" else "휴식 시간이 끝났어요", fontSize = 40.sp, fontWeight = FontWeight.Bold, color = Accent)
+        Text(if (overdue) "예정된 알람 시각이 지났어요" else s.alarmReason.title, fontSize = 40.sp, fontWeight = FontWeight.Bold, color = Accent)
         Text(if (overdue) Texts.OVERDUE else "'일어났어' 또는 '5분 더'라고 말하거나 버튼을 눌러 주세요.", fontSize = 20.sp)
+        if (!overdue && s.alarmReason != AlarmReason.WAKE_TIME) {
+            Text("기상 시각보다 먼저 깨웠어요. '5분 더'는 소리만 미뤄요 — 전력 보호 한도는 늘어나지 않아요.", fontSize = 18.sp, color = Color.LightGray)
+            EnergyCard(ui, big = false)
+        }
         if (s.snoozeCount > 0) Text("다시 알림 ${s.snoozeCount}번", fontSize = 18.sp, color = Color.Gray)
         Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
             Button(onClick = c::wake, Modifier.height(80.dp)) { Text("일어났어", fontSize = 26.sp) }
@@ -209,6 +288,9 @@ private fun Restore(ui: NapUi, c: NapController) {
     Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
         Text("원래 설정으로 되돌릴까요?", fontSize = 30.sp, fontWeight = FontWeight.Bold)
         Text("종료: ${s.endReason?.label ?: "-"}", fontSize = 18.sp, color = Color.Gray)
+        ui.nap.guard?.takeIf { it.status.shed }?.let { g ->
+            Text("전력 보호: ${g.status.simpleLabel} — 보호로 끈 장치는 자동으로 다시 켜지 않아요. 필요하면 전원을 확인하고 새로 시작해 주세요.", fontSize = 18.sp, color = Accent)
+        }
         if (!ui.controlAllowed) Text("주차 상태가 아니에요 — 시트·공조를 움직이지 않아요", color = Accent, fontSize = 18.sp)
         ui.restorePlan.forEach { item ->
             Row(
@@ -218,12 +300,12 @@ private fun Restore(ui: NapUi, c: NapController) {
                 Column(Modifier.weight(1f)) {
                     Text(item.target.label, fontSize = 19.sp, fontWeight = FontWeight.SemiBold)
                     Text("원래 ${item.original ?: "읽지 못함"} · 앱이 바꾼 값 ${item.appSet ?: "없음"} · 지금 ${item.current ?: "-"}", fontSize = 15.sp, color = Color.LightGray)
-                    Text(item.decision.label, fontSize = 15.sp, color = if (item.decision == RestoreDecision.CONFIRM_MANUAL_CHANGE) Accent else Color.Gray)
+                    Text(item.decision.label, fontSize = 15.sp, color = if (item.decision == RestoreDecision.CONFIRM_MANUAL_CHANGE || item.decision == RestoreDecision.BLOCKED_BY_PROTECTION) Accent else Color.Gray)
                 }
                 when (item.decision) {
                     RestoreDecision.RESTORE -> Button(onClick = { c.restore(item) }, enabled = ui.controlAllowed) { Text("되돌리기") }
                     RestoreDecision.CONFIRM_MANUAL_CHANGE -> OutlinedButton(onClick = { c.restore(item) }, enabled = ui.controlAllowed) { Text("그래도 원래 값으로") }
-                    RestoreDecision.NOTHING_TO_DO, RestoreDecision.ALREADY_RESTORED -> Unit
+                    RestoreDecision.NOTHING_TO_DO, RestoreDecision.ALREADY_RESTORED, RestoreDecision.BLOCKED_BY_PROTECTION -> Unit
                 }
             }
         }
@@ -246,7 +328,8 @@ private fun History(ui: NapUi, c: NapController) {
         list.forEach { r ->
             val actual = r.actualMs / 1000
             Text("${c.time(r.startedWallMs)} · 계획 ${Texts.duration(r.requestedSeconds)} · 실제 ${Texts.duration(actual)} · ${r.endReason.label}" +
-                (if (r.snoozeCount > 0) " · 다시 알림 ${r.snoozeCount}번" else "") + (if (r.demoShortened) " · 시연 단축" else ""), fontSize = 15.sp, color = Color.LightGray)
+                (if (r.snoozeCount > 0) " · 다시 알림 ${r.snoozeCount}번" else "") + (if (r.demoShortened) " · 시연 단축" else "") +
+                (r.profile?.let { " · ${it.label}" } ?: "") + (r.guardOutcome?.takeIf { it.shed }?.let { " · 전력 보호: ${it.simpleLabel}" } ?: ""), fontSize = 15.sp, color = Color.LightGray)
         }
     }
 }
@@ -262,6 +345,28 @@ private fun DemoPanel(ui: NapUi, c: NapController) {
         Text("시연 패널", color = BannerText, fontWeight = FontWeight.Bold, fontSize = 18.sp)
         Text("실제 사용자 화면이 아닌 시연·검증용 입력", fontSize = 12.sp, color = Color.Gray)
         HorizontalDivider()
+        Text("버튼 하나로 장면 재현", fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+        val idle = ui.nap.session == null && ui.controlAllowed
+        Button(onClick = c::sceneEv, enabled = idle, modifier = Modifier.fillMaxWidth()) { Text("장면 1 · 전기차 전력 보호") }
+        Button(onClick = c::sceneCamping, enabled = idle, modifier = Modifier.fillMaxWidth()) { Text("장면 2 · 내연기관차 + 캠핑 배터리") }
+        Button(onClick = c::sceneStarter, enabled = idle, modifier = Modifier.fillMaxWidth()) { Text("장면 3 · 12V 만 있는 차(계산 불가)") }
+        HorizontalDivider()
+        Text("모의 전원", fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+        val e = ui.energy
+        Text("전기차 SOC ${"%.2f".format(e.evSoc)}% · ${RuntimeEstimate.w(e.evLoadW)}${if (e.evClimateOn) "" else " (공조 꺼짐)"}", fontSize = 14.sp)
+        Text("캠핑 배터리 ${"%.0f".format(e.campingWh)}Wh · ${RuntimeEstimate.w(e.campingLoadW)}${if (e.campingLightOn) "" else " (조명 꺼짐)"}", fontSize = 14.sp)
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OutlinedButton(onClick = { c.changeLoad(-500.0) }, Modifier.weight(1f)) { Text("소비 −") }
+            OutlinedButton(onClick = { c.changeLoad(500.0) }, Modifier.weight(1f)) { Text("소비 +") }
+        }
+        Toggle("배터리 소모 30배속(시간 단축)", e.drainSpeed > 1) { on -> c.energy { copy(drainSpeed = if (on) 30 else 1) } }
+        Toggle("측정값 끊김", e.dataCut) { on -> c.energy { copy(dataCut = on) } }
+        Toggle("충전/전원 공급 중", e.charging) { on -> c.energy { copy(charging = on) } }
+        Toggle("12V 경고 신호(차량)", e.starterWarning) { on -> c.energy { copy(starterWarning = on) } }
+        Toggle("장치 종료 실패", e.failShed) { on -> c.energy { copy(failShed = on) } }
+        Toggle("장치 종료 응답 없음", e.noResponseShed) { on -> c.energy { copy(noResponseShed = on) } }
+        HorizontalDivider()
+        Text("타이머·공조·시트", fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
         Button(onClick = { c.startRest(demo20s = true) }, enabled = ui.nap.session == null && ui.controlAllowed, modifier = Modifier.fillMaxWidth()) {
             Text("20초 타이머로 시작(시간 단축)")
         }

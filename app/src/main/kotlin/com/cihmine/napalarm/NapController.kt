@@ -4,7 +4,16 @@ import android.app.Application
 import android.os.SystemClock
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.cihmine.napalarm.core.AlarmReason
 import com.cihmine.napalarm.core.Clock
+import com.cihmine.napalarm.core.GuardEvent
+import com.cihmine.napalarm.core.GuardStatus
+import com.cihmine.napalarm.core.Load
+import com.cihmine.napalarm.core.ReserveSettings
+import com.cihmine.napalarm.core.RuntimeEstimate
+import com.cihmine.napalarm.core.VehicleProfile
+import com.cihmine.napalarm.vehicle.MockEnergy
+import com.cihmine.napalarm.vehicle.MockEnergyState
 import com.cihmine.napalarm.core.ControlState
 import com.cihmine.napalarm.core.ControlTarget
 import com.cihmine.napalarm.core.NapCodec
@@ -64,6 +73,11 @@ data class NapUi(
     val ttsEngine: String = "",
     val sttEngine: String = "",
     val phoneReservation: Boolean = false,
+    val energy: MockEnergyState = MockEnergyState(),
+    /** 지금 남은 장치 사용 시간 추정(계산 불가면 이유) */
+    val estimate: RuntimeEstimate? = null,
+    /** 시연 장면 안내("장면 1 · 2/4 …"). 장면이 끝나면 null */
+    val sceneCaption: String? = null,
 ) {
     val controlAllowed: Boolean get() = vehicle == VehicleState.PARKED
 }
@@ -85,13 +99,21 @@ class NapController(app: Application) : AndroidViewModel(app) {
         _ui.update { it.copy(car = s) }
     }
 
-    private val _ui: MutableStateFlow<NapUi> = MutableStateFlow(NapUi(nap = engine.state, car = car.state))
+    private val energyStore = JsonFileStore(app.filesDir, "mock_energy.json",
+        { NapJson.json.encodeToString(MockEnergyState.serializer(), it) }, { NapJson.json.decodeFromString(MockEnergyState.serializer(), it) })
+    private val energy = MockEnergy(energyStore.load() ?: MockEnergyState()) { s ->
+        runCatching { energyStore.save(s) }
+        _ui.update { it.copy(energy = s) }
+    }
+
+    private val _ui: MutableStateFlow<NapUi> = MutableStateFlow(NapUi(nap = engine.state, car = car.state, energy = energy.state))
     val ui: StateFlow<NapUi> = _ui
 
     private val alarm = AlarmSound(viewModelScope)
     private val tts = Voice.output(app) { ok -> _ui.update { it.copy(ttsReady = ok) } }
     private val stt = Voice.input(app) { ok -> _ui.update { it.copy(sttAvailable = ok) } }
     private var ticker: Job? = null
+    private var scene: Job? = null
     private var reservationDone = false
 
     /** 진행 중인 모의 제어 요청. 휴식이 끝나거나 새로 시작하면 취소한다. */
@@ -145,13 +167,22 @@ class NapController(app: Application) : AndroidViewModel(app) {
     private fun startTicker() {
         if (ticker?.isActive == true) return
         ticker = viewModelScope.launch {
+            var last = SystemClock.elapsedRealtime()
+            var saveCounter = 0
             while (isActive) {
                 when (val e = engine.tick(clock)) {
                     is TickEvent.Ring -> onRing(e)
                     TickEvent.None -> Unit
                 }
+                val now = SystemClock.elapsedRealtime()
+                // 휴식 중에만 모의 배터리를 소모한다(설정 화면에서는 값이 그대로)
+                val st = engine.session?.status
+                if (st == NapStatus.RESTING || st == NapStatus.SNOOZED || st == NapStatus.RINGING) energy.drain(now - last)
+                last = now
+                energyTick()
                 checkReservation()
-                _ui.update { it.copy(remainingMs = engine.remainingMs(clock)) }
+                _ui.update { it.copy(remainingMs = engine.remainingMs(clock), energy = energy.state) }
+                if (++saveCounter % 20 == 0) energy.save() // 5초마다 모의 전원 값 저장
                 delay(250)
             }
         }
@@ -160,9 +191,54 @@ class NapController(app: Application) : AndroidViewModel(app) {
     private fun onRing(e: TickEvent.Ring) {
         // 듣는 중이었으면 마이크를 닫고 울린다(알람·안내가 인식과 겹치지 않게).
         stopListening()
-        commit(if (e.sequence == 1) "휴식 시간이 끝났어요" else "다시 알림 시간이 됐어요")
+        val reason = engine.session?.alarmReason ?: AlarmReason.WAKE_TIME
+        commit(if (reason == AlarmReason.WAKE_TIME && e.sequence > 1) "다시 알림 시간이 됐어요" else reason.title)
         alarm.start()
-        if (_ui.value.ttsReady) tts.speak(Texts.ALARM, 100) {}
+        if (_ui.value.ttsReady) tts.speak(Texts.alarmSpeech(reason), 100) {}
+    }
+
+    // ── 전력 보호 ─────────────────────────────────────────
+
+    /** 모의 전원 값으로 남은 시간을 계산하고 보호 판단을 진행한다. 상태가 바뀔 때만 저장한다. */
+    private fun energyTick() {
+        val before = engine.state.guard
+        val t = engine.energyTick(energy.readings(clock.wallMs()), clock)
+        _ui.update { it.copy(estimate = t.estimate) }
+        if (engine.state.guard != before) commit()
+        t.events.forEach { ev ->
+            when (ev) {
+                is GuardEvent.ProtectionBeforeWake -> say(Texts.protectionBeforeWake(ev.minutes))
+                is GuardEvent.DataLost -> say("전원 측정값이 끊겼어요. 남은 시간을 계산할 수 없어요 — 장치를 껐다고 가정하지 않아요.")
+                is GuardEvent.RequestShed -> shed(ev.loads)
+                is GuardEvent.WarnEarly, GuardEvent.StarterWarning -> Unit // 알람으로 처리
+            }
+        }
+        val ring = t.ring
+        if (ring is TickEvent.Ring) onRing(ring)
+    }
+
+    private fun say(text: String) {
+        commit(text)
+        if (_ui.value.ttsReady && engine.session?.status != NapStatus.RINGING) tts.speak(text, 100) {}
+    }
+
+    /** 보호 기준 도달: 미리 정한 모의 장치에 종료 요청 → 응답으로 결과 확인(응답 없음·실패는 종료됨으로 쓰지 않음) */
+    private fun shed(loads: List<Load>) {
+        val sessionId = engine.session?.id ?: return
+        val names = loads.joinToString { it.label }
+        commit("전력 보호 기준 도달 — 모의 $names 종료 요청")
+        viewModelScope.launch {
+            val result = withTimeoutOrNull(3_000) { energy.shed(loads) } ?: ControlState.TIMED_OUT
+            if (engine.session?.id != sessionId) return@launch
+            when (engine.onShedResult(result, clock)) {
+                GuardStatus.SHED_CONFIRMED -> say("모의 $names 꺼짐(모의 장치 응답). 보호 종료 뒤에는 자동으로 다시 켜지 않아요.")
+                GuardStatus.SHED_FAILED -> {
+                    say("모의 $names 를 끄지 못했어요(${result.label}). 직접 꺼 주세요.")
+                    if (engine.session?.status != NapStatus.RINGING) alarm.start()
+                }
+                else -> commit()
+            }
+        }
     }
 
     // ── 시작 ──────────────────────────────────────────────
@@ -174,6 +250,20 @@ class NapController(app: Application) : AndroidViewModel(app) {
 
     fun setTemperature(c: Double) {
         engine.setPreferences(engine.state.prefs.copy(temperatureC = c.coerceIn(17.0, 28.0)))
+        commit()
+    }
+
+    fun setProfile(p: VehicleProfile) {
+        if (engine.state.active) return
+        engine.setPreferences(engine.state.prefs.copy(profile = p))
+        commit()
+    }
+
+    fun setReserve(r: ReserveSettings) {
+        if (engine.state.active) return
+        engine.setPreferences(engine.state.prefs.copy(reserve = r.copy(
+            evReserveSoc = r.evReserveSoc.coerceIn(10.0, 80.0), campingReserveWh = r.campingReserveWh.coerceIn(50.0, 1_000.0),
+        )))
         commit()
     }
 
@@ -232,6 +322,7 @@ class NapController(app: Application) : AndroidViewModel(app) {
 
     fun wake() {
         if (!engine.wake(clock)) return
+        endScene()
         cancelControls()
         stopListening()
         alarm.stop()
@@ -242,6 +333,7 @@ class NapController(app: Application) : AndroidViewModel(app) {
 
     fun stopEarly() {
         if (!engine.stopEarly(clock)) return
+        endScene()
         cancelControls()
         stopListening()
         alarm.stop()
@@ -273,6 +365,7 @@ class NapController(app: Application) : AndroidViewModel(app) {
 
     fun finishRestore() {
         engine.finish() ?: return
+        endScene()
         cancelControls()
         stopListening()
         _ui.update { it.copy(restorePlan = emptyList()) }
@@ -381,10 +474,85 @@ class NapController(app: Application) : AndroidViewModel(app) {
         launchControl { control(s.id, ControlTarget.CLIMATE, VehicleSettings(temperatureC = original), note = "휴대폰 예약(모의)") }
     }
 
+    // ── 시연 패널: 모의 전원 ───────────────────────────────
+
+    fun energy(change: MockEnergyState.() -> MockEnergyState) = energy.update(change)
+
+    /** 지금 차량·전원 구성에서 소비 전력을 바꾼다(전기차 공조 / 캠핑 조명) */
+    fun changeLoad(deltaW: Double) = energy.update {
+        when (engine.state.guard?.profile ?: engine.state.prefs.profile) {
+            VehicleProfile.EV -> copy(evClimateW = (evClimateW + deltaW).coerceIn(0.0, 6_000.0))
+            VehicleProfile.ICE_CAMPING -> copy(campingLightW = (campingLightW + deltaW / 10).coerceIn(0.0, 600.0))
+            VehicleProfile.ICE -> this
+        }
+    }
+
+    // ── 시연 장면(버튼 하나로 처음부터 끝까지) ────────────
+
+    private fun endScene() {
+        scene?.cancel()
+        scene = null
+        if (energy.state.drainSpeed != 1) energy.update { copy(drainSpeed = 1) }
+        _ui.update { it.copy(sceneCaption = null) }
+    }
+
+    private fun caption(text: String) = _ui.update { it.copy(sceneCaption = text) }
+
+    /** 장면 진행 중 휴식이 끝났으면 멈춘다 */
+    private fun sceneAlive(id: String) = engine.session?.id == id && engine.session?.status != NapStatus.RESTORE_PENDING
+
+    /**
+     * 장면 1 · 전기차: 1.5kW → 12시간, 공조 세게 3kW → 6시간, 보존량 근처(시간 단축) → 기상 전에 먼저 깨움,
+     * 소모 30배속 → 보존량 도달 → 모의 공조 종료.
+     */
+    fun sceneEv() = runScene(VehicleProfile.EV) { id ->
+        caption("장면 1 · 1/4  전기차 60kWh(가정)·SOC 60%·보존 30% · 소비 1.5kW → 남은 시간 12시간")
+        delay(6_000); if (!sceneAlive(id)) return@runScene
+        energy.update { copy(evClimateW = 2_800.0) }
+        caption("장면 1 · 2/4  공조를 세게(총 3kW) → 남은 시간이 6시간으로 줄어요")
+        delay(6_000); if (!sceneAlive(id)) return@runScene
+        energy.update { copy(evSoc = 30.6) }
+        caption("장면 1 · 3/4  보존량 근처로 이동(시간 단축) → 기상 시각 전에 먼저 깨워요 · '5분 더'를 눌러도 한도는 그대로")
+        delay(8_000); if (!sceneAlive(id)) return@runScene
+        energy.update { copy(drainSpeed = 30) }
+        caption("장면 1 · 4/4  배터리 소모 30배속 → 보존량 30%에 닿으면 모의 공조를 끄고 결과를 확인해요")
+    }
+
+    /** 장면 2 · 내연기관차 + 캠핑 배터리: 800Wh·조명 100W → 6시간, 보존량 근처 → 먼저 깨움 → 모의 조명 종료 */
+    fun sceneCamping() = runScene(VehicleProfile.ICE_CAMPING) { id ->
+        caption("장면 2 · 1/3  내연기관차 + 캠핑 배터리 800Wh·보존 200Wh · 조명 100W → 6시간 (순정 공조가 아니라 캠핑 배터리에 연결된 장치만)")
+        delay(7_000); if (!sceneAlive(id)) return@runScene
+        energy.update { copy(campingWh = 215.0) }
+        caption("장면 2 · 2/3  보존량 근처로 이동(시간 단축) → 먼저 깨워요")
+        delay(8_000); if (!sceneAlive(id)) return@runScene
+        energy.update { copy(drainSpeed = 30) }
+        caption("장면 2 · 3/3  소모 30배속 → 보존량 200Wh 에 닿으면 모의 캠핑 조명을 꺼요")
+    }
+
+    /** 장면 3 · 12V 만 있는 내연기관차: 남은 시간 "계산 불가", 그래도 알람은 울린다(20초 단축 타이머) */
+    fun sceneStarter() = runScene(VehicleProfile.ICE, demo20s = true) { id ->
+        caption("장면 3 · 1/2  12V 시동 배터리만 있는 차 → 전압만으로는 남은 시간을 알 수 없어 '계산 불가' · 알람만 써요")
+        delay(10_000); if (!sceneAlive(id)) return@runScene
+        caption("장면 3 · 2/2  20초 뒤 평소처럼 알람이 울려요(시간 단축). 시연 패널의 '12V 경고 신호'로 차량 경고 알람도 볼 수 있어요")
+    }
+
+    private fun runScene(profile: VehicleProfile, demo20s: Boolean = false, steps: suspend (String) -> Unit) {
+        if (engine.state.active) return commit("진행 중인 휴식을 먼저 끝내 주세요")
+        endScene()
+        energy.update { MockEnergyState(failShed = failShed, noResponseShed = noResponseShed) }
+        // 모의 차량도 처음 값(24℃·기본 자세)으로 — 복구 화면에서 "원래 값"이 장면마다 같게 보이도록
+        car.update { copy(settings = MockCarState().settings) }
+        engine.setPreferences(engine.state.prefs.copy(profile = profile, reserve = ReserveSettings(), lastMinutes = 30))
+        startRest(demo20s)
+        val id = engine.session?.id ?: return
+        scene = viewModelScope.launch { steps(id) }
+    }
+
     fun time(wallMs: Long) = Texts.clock(wallMs, zone)
 
     fun onAppStopped() {
         runCatching { store.save(engine.state) }
+        energy.save()
     }
 
     override fun onCleared() {
