@@ -72,6 +72,8 @@ dependencies {
     // Pleos Connect 음성 인식·안내 SDK. Pleos 음성 서비스가 없는 기기에서는 안드로이드 기본 음성을 쓴다.
     implementation("ai.pleos.playground:SpeechToText:3.3.1")
     implementation("ai.pleos.playground:TextToSpeech:3.3.1")
+    // 실제 기어 상태
+    implementation("ai.pleos.playground:Vehicle:2.3.2")
     implementation(platform("androidx.compose:compose-bom:2025.05.00"))
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.material3:material3")

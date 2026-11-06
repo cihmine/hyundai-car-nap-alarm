@@ -38,6 +38,7 @@ import com.cihmine.napalarm.speech.SpeechInput
 import com.cihmine.napalarm.speech.Voice
 import com.cihmine.napalarm.vehicle.MockCar
 import com.cihmine.napalarm.vehicle.MockCarState
+import com.cihmine.napalarm.vehicle.PleosGear
 import com.cihmine.napalarm.vehicle.VehicleState
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -78,6 +79,10 @@ data class NapUi(
     val estimate: RuntimeEstimate? = null,
     /** 시연 장면 안내("장면 1 · 2/4 …"). 장면이 끝나면 null */
     val sceneCaption: String? = null,
+    /** 시연 패널 열림. 기본은 닫힘 — 앱을 켜면 실제 사용자 화면이 나온다. */
+    val demoPanel: Boolean = false,
+    /** 실제 기어 값을 쓰는 중이면 그 표시(P·D 등). null 이면 시연 패널의 모의 상태를 쓰는 중이다. */
+    val gearLabel: String? = null,
 ) {
     val controlAllowed: Boolean get() = vehicle == VehicleState.PARKED
 }
@@ -112,6 +117,10 @@ class NapController(app: Application) : AndroidViewModel(app) {
     private val alarm = AlarmSound(viewModelScope)
     private val tts = Voice.output(app) { ok -> _ui.update { it.copy(ttsReady = ok) } }
     private val stt = Voice.input(app) { ok -> _ui.update { it.copy(sttAvailable = ok) } }
+    private val gear = PleosGear(app) { state, label ->
+        _ui.update { it.copy(gearLabel = label) }
+        applyVehicle(state)
+    }
     private var ticker: Job? = null
     private var scene: Job? = null
     private var reservationDone = false
@@ -435,7 +444,15 @@ class NapController(app: Application) : AndroidViewModel(app) {
 
     // ── 시연 패널 ─────────────────────────────────────────
 
+    fun toggleDemoPanel() = _ui.update { it.copy(demoPanel = !it.demoPanel) }
+
+    /** 시연 패널의 모의 상태. 다음 실제 기어 값이 오면 그 값으로 바뀐다. */
     fun setVehicle(v: VehicleState) {
+        _ui.update { it.copy(gearLabel = null) }
+        applyVehicle(v)
+    }
+
+    private fun applyVehicle(v: VehicleState) {
         _ui.update { it.copy(vehicle = v) }
         if (v != VehicleState.PARKED) commit("주차 상태가 아니어서 공조·시트 요청을 막아요")
     }
@@ -556,6 +573,7 @@ class NapController(app: Application) : AndroidViewModel(app) {
     }
 
     override fun onCleared() {
+        gear.release()
         alarm.stop()
         tts.shutdown()
         stt.shutdown()

@@ -1,6 +1,7 @@
 package com.cihmine.napalarm.ui
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -64,9 +65,17 @@ fun NapApp(c: NapController) {
     Surface(Modifier.fillMaxSize(), color = if (dark) Night else Color(0xFF121218), contentColor = Color.White) {
         Column(Modifier.fillMaxSize()) {
             Row(Modifier.fillMaxWidth().background(Banner).padding(horizontal = 16.dp, vertical = 8.dp)) {
-                Text("차량 연동 시뮬레이션 · 공조·시트·전원·장치: 모의 · 차량 상태: 모의 ${ui.vehicle.label}", color = BannerText, fontSize = 15.sp)
+                Text("차량 연동 시뮬레이션 · 공조·시트·전원·장치: 모의 · 차량 상태: ${ui.gearLabel?.let { "실제 기어 $it" } ?: "모의 ${ui.vehicle.label}"}", color = BannerText, fontSize = 15.sp)
                 Spacer(Modifier.weight(1f))
                 Text("음성: ${ui.sttEngine} / ${ui.ttsEngine}", color = BannerText, fontSize = 15.sp)
+                Spacer(Modifier.width(24.dp))
+                Text(
+                    if (ui.demoPanel) "시연 패널 닫기 ▸" else "◂ 시연 패널",
+                    color = Color.White,
+                    fontSize = 15.sp,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.clickable(onClick = c::toggleDemoPanel),
+                )
             }
             Row(Modifier.fillMaxSize()) {
                 Column(Modifier.weight(1f).fillMaxHeight().verticalScroll(rememberScrollState()).padding(24.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
@@ -78,7 +87,7 @@ fun NapApp(c: NapController) {
                         NapStatus.RESTORE_PENDING -> Restore(ui, c)
                     }
                 }
-                DemoPanel(ui, c)
+                if (ui.demoPanel) DemoPanel(ui, c)
             }
         }
     }
@@ -147,9 +156,10 @@ private fun MicButton(ui: NapUi, c: NapController) {
 @Composable
 private fun Setup(ui: NapUi, c: NapController) {
     val prefs = ui.nap.prefs
+    var settingsOpen by remember { mutableStateOf(false) }
     Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
         Text("낮잠 알람", fontSize = 34.sp, fontWeight = FontWeight.Bold)
-        Text("주차한 차에서 쉬는 동안 기상 시각에 깨워 주고, 배터리가 정해 둔 보존량에 닿기 전에 먼저 깨워 장치를 꺼 주는 앱", fontSize = 18.sp, color = Color.LightGray)
+        Text("차에서 쉬는 동안 깨워 주고, 배터리가 줄면 먼저 깨워 장치를 꺼 드려요", fontSize = 18.sp, color = Color.LightGray)
         Text(if (ui.controlAllowed) "주차 중 · 앱이 켜져 있는 동안 알람이 울려요" else "주차 상태가 아니에요 — 휴식을 시작할 수 없어요",
             fontSize = 18.sp, color = if (ui.controlAllowed) Color.LightGray else Accent)
         Text("휴식 시간", fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
@@ -162,38 +172,7 @@ private fun Setup(ui: NapUi, c: NapController) {
             }
         }
         Text("예상 알람 시각: ${c.time(System.currentTimeMillis() + prefs.lastMinutes * 60_000L)}", fontSize = 20.sp)
-        HorizontalDivider()
-        Text("차량·전원", fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
-        FlowRow(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            VehicleProfile.entries.forEach { p -> FilterChip(prefs.profile == p, { c.setProfile(p) }, { Text(p.label, fontSize = 17.sp) }) }
-        }
-        when (prefs.profile.managed) {
-            PowerSource.EV_TRACTION -> Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                Text("남길 배터리", fontSize = 18.sp)
-                OutlinedButton(onClick = { c.setReserve(prefs.reserve.copy(evReserveSoc = prefs.reserve.evReserveSoc - 5)) }) { Text("−") }
-                Text("SOC ${prefs.reserve.evReserveSoc.toInt()}%", fontSize = 20.sp)
-                OutlinedButton(onClick = { c.setReserve(prefs.reserve.copy(evReserveSoc = prefs.reserve.evReserveSoc + 5)) }) { Text("+") }
-            }
-            PowerSource.CAMPING -> Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                Text("남길 캠핑 배터리", fontSize = 18.sp)
-                OutlinedButton(onClick = { c.setReserve(prefs.reserve.copy(campingReserveWh = prefs.reserve.campingReserveWh - 50)) }) { Text("−") }
-                Text("${prefs.reserve.campingReserveWh.toInt()}Wh", fontSize = 20.sp)
-                OutlinedButton(onClick = { c.setReserve(prefs.reserve.copy(campingReserveWh = prefs.reserve.campingReserveWh + 50)) }) { Text("+") }
-            }
-            else -> Unit
-        }
-        EnergyCard(ui, big = false)
-        HorizontalDivider()
-        Text("휴식 설정(모의 차량)", fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
-        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            Text("공조 온도", fontSize = 18.sp)
-            OutlinedButton(onClick = { c.setTemperature(prefs.temperatureC - 0.5) }) { Text("−") }
-            Text("%.1f℃".format(prefs.temperatureC), fontSize = 20.sp)
-            OutlinedButton(onClick = { c.setTemperature(prefs.temperatureC + 0.5) }) { Text("+") }
-        }
-        FlowRow(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            SeatPreset.entries.forEach { s -> FilterChip(prefs.seatPreset == s, { c.setSeat(s) }, { Text(s.label) }) }
-        }
+        EnergyLine(ui)
         ui.pendingMinutes?.let { m ->
             Box(Modifier.fillMaxWidth().background(Panel, RoundedCornerShape(12.dp)).padding(16.dp)) {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -208,11 +187,61 @@ private fun Setup(ui: NapUi, c: NapController) {
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             Button(onClick = { c.startRest() }, enabled = ui.controlAllowed, modifier = Modifier.height(64.dp)) { Text("휴식 시작", fontSize = 22.sp) }
             MicButton(ui, c)
+            OutlinedButton(onClick = { settingsOpen = !settingsOpen }, Modifier.height(64.dp)) {
+                Text(if (settingsOpen) "설정 닫기 ▴" else "설정 ▾", fontSize = 18.sp)
+            }
         }
         Message(ui)
+        if (settingsOpen) {
+            HorizontalDivider()
+            Text("차량·전원", fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                VehicleProfile.entries.forEach { p -> FilterChip(prefs.profile == p, { c.setProfile(p) }, { Text(p.label, fontSize = 17.sp) }) }
+            }
+            when (prefs.profile.managed) {
+                PowerSource.EV_TRACTION -> Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text("남길 배터리", fontSize = 18.sp)
+                    OutlinedButton(onClick = { c.setReserve(prefs.reserve.copy(evReserveSoc = prefs.reserve.evReserveSoc - 5)) }) { Text("−") }
+                    Text("SOC ${prefs.reserve.evReserveSoc.toInt()}%", fontSize = 20.sp)
+                    OutlinedButton(onClick = { c.setReserve(prefs.reserve.copy(evReserveSoc = prefs.reserve.evReserveSoc + 5)) }) { Text("+") }
+                }
+                PowerSource.CAMPING -> Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text("남길 캠핑 배터리", fontSize = 18.sp)
+                    OutlinedButton(onClick = { c.setReserve(prefs.reserve.copy(campingReserveWh = prefs.reserve.campingReserveWh - 50)) }) { Text("−") }
+                    Text("${prefs.reserve.campingReserveWh.toInt()}Wh", fontSize = 20.sp)
+                    OutlinedButton(onClick = { c.setReserve(prefs.reserve.copy(campingReserveWh = prefs.reserve.campingReserveWh + 50)) }) { Text("+") }
+                }
+                else -> Unit
+            }
+            EnergyCard(ui, big = false)
+            HorizontalDivider()
+            Text("휴식 설정(모의 차량)", fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text("공조 온도", fontSize = 18.sp)
+                OutlinedButton(onClick = { c.setTemperature(prefs.temperatureC - 0.5) }) { Text("−") }
+                Text("%.1f℃".format(prefs.temperatureC), fontSize = 20.sp)
+                OutlinedButton(onClick = { c.setTemperature(prefs.temperatureC + 0.5) }) { Text("+") }
+            }
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                SeatPreset.entries.forEach { s -> FilterChip(prefs.seatPreset == s, { c.setSeat(s) }, { Text(s.label) }) }
+            }
+            History(ui, c)
+        }
         Text(Texts.NOT_GUARANTEE, fontSize = 14.sp, color = Color.Gray)
-        History(ui, c)
     }
+}
+
+/** 첫 화면의 전력 요약. 계산식과 보호 설정은 설정과 휴식 화면에서 보여 준다. */
+@Composable
+private fun EnergyLine(ui: NapUi) {
+    val text = when (val e = ui.estimate) {
+        is RuntimeEstimate.Available -> if (e.minutes <= 0.0) "보존량에 도달했어요 — 남은 사용 시간 없음" else "장치 사용 가능 예상 ${Texts.durationMinutes(e.minutes)}"
+        is RuntimeEstimate.Charging -> "충전/전원 공급 중"
+        is RuntimeEstimate.NoDrain -> "소비 없음 — 시간을 계산하지 않아요"
+        is RuntimeEstimate.Unknown -> e.reason.label
+        null -> "계산 중…"
+    }
+    Text(text, fontSize = 20.sp, fontWeight = FontWeight.SemiBold, color = Accent)
 }
 
 @Composable
@@ -370,7 +399,7 @@ private fun DemoPanel(ui: NapUi, c: NapController) {
         Button(onClick = { c.startRest(demo20s = true) }, enabled = ui.nap.session == null && ui.controlAllowed, modifier = Modifier.fillMaxWidth()) {
             Text("20초 타이머로 시작(시간 단축)")
         }
-        Text("모의 차량 상태", fontSize = 15.sp)
+        Text("모의 차량 상태(실제 기어 값이 바뀌면 그 값이 우선해요)", fontSize = 15.sp)
         FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             VehicleState.entries.forEach { v -> FilterChip(ui.vehicle == v, { c.setVehicle(v) }, { Text(v.label) }) }
         }
