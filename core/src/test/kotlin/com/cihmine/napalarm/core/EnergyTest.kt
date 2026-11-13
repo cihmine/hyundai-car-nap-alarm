@@ -16,6 +16,46 @@ class EnergyTest {
     private fun ev(loadW: Double, soc: Double = 60.0, at: Long = clock.wall) =
         EnergyReading(PowerSource.EV_TRACTION, at, usableCapacityWh = 60_000.0, socPercent = soc, dischargeW = loadW)
 
+    @Test
+    fun `실제 전기차 값은 범위 안일 때만 쓰고 잔량을 지어내지 않는다`() {
+        assertEquals(RealEvBattery(100.0, 77_400.0), RealEvBattery.of(100, 77_400f))
+        assertEquals(RealEvBattery(55.0, null), RealEvBattery.of(55, null))
+        assertEquals(RealEvBattery(55.0, null), RealEvBattery.of(55, 0f))
+        assertEquals(null, RealEvBattery.of(null, 77_400f))
+        assertEquals(null, RealEvBattery.of(101, 77_400f))
+        assertEquals(null, RealEvBattery.of(-1, 77_400f))
+    }
+
+    @Test
+    fun `실제 잔량과 용량으로 남은 시간을 계산한다`() {
+        val real = assertNotNull(RealEvBattery.of(100, 77_400f))
+        val reading = EnergyReading(
+            PowerSource.EV_TRACTION, clock.wall, usableCapacityWh = real.capacityWh, socPercent = real.socPercent, dischargeW = 1_500.0,
+        )
+        val estimate = assertIs<RuntimeEstimate.Available>(RuntimeEstimator.estimate(reading, PowerSource.EV_TRACTION, reserve, clock.wall))
+        assertEquals(36.12 * 60, estimate.minutes, 0.01)
+    }
+
+    @Test
+    fun `남길 배터리를 km 로 정하면 지금 1퍼센트당 거리로 바꿔 계산하고 거리를 모르면 계산 불가`() {
+        val km = reserve.copy(evUnit = ReserveUnit.KM, evReserveKm = 100.0)
+        // 60% 에 300km → 1%당 5km → 100km = 20%
+        assertEquals(20.0, assertNotNull(km.evSocFor(60.0, 300.0)), 0.001)
+        val reading = EnergyReading(PowerSource.EV_TRACTION, clock.wall, usableCapacityWh = 60_000.0, socPercent = 60.0, rangeKm = 300.0, dischargeW = 1_500.0)
+        val estimate = assertIs<RuntimeEstimate.Available>(RuntimeEstimator.estimate(reading, PowerSource.EV_TRACTION, km, clock.wall))
+        assertEquals(12_000.0, estimate.reserveWh, 0.01)
+        assertEquals("100km", km.evLabel)
+        // 주행 가능 거리 없음·충전률 0 → 지어내지 않는다
+        assertEquals(null, km.evSocFor(60.0, null))
+        assertEquals(null, km.evSocFor(0.0, 300.0))
+        val unknown = assertIs<RuntimeEstimate.Unknown>(RuntimeEstimator.estimate(reading.copy(rangeKm = null), PowerSource.EV_TRACTION, km, clock.wall))
+        assertEquals(UnknownReason.NO_RESERVE_BASIS, unknown.reason)
+        // 남길 거리가 지금 거리보다 많으면 100% 에서 자른다
+        assertEquals(100.0, assertNotNull(km.copy(evReserveKm = 600.0).evSocFor(60.0, 300.0)), 0.001)
+        // % 단위는 그대로
+        assertEquals(30.0, reserve.evSocFor(60.0, null))
+    }
+
     private fun camping(remainingWh: Double, loadW: Double = 100.0) =
         EnergyReading(PowerSource.CAMPING, clock.wall, remainingWh = remainingWh, dischargeW = loadW)
 

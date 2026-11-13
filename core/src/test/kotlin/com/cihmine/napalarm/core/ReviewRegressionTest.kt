@@ -47,12 +47,6 @@ class ReviewRegressionTest {
     }
 
     @Test
-    fun `소수점 시간은 다른 정수로 바꾸지 않고 거절한다`() {
-        assertEquals(Utterance.Unknown, VoiceParser.parse("1.5분"))
-        assertEquals(Utterance.Duration(30), VoiceParser.parse("30분."))
-    }
-
-    @Test
     fun `휴식 중 시스템 시각을 바꿔도 기록의 실제 시간은 경과 시간이다`() {
         val clock = FakeClock()
         val e = NapEngine().also { it.start(30 * 60L, clock) }

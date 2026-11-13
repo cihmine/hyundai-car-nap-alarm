@@ -15,7 +15,7 @@ import ai.pleos.playground.vehicle.listener.GearSelectionListener
  */
 class PleosGear(context: Context, private val onGear: (VehicleState, String) -> Unit) {
     private val main = Handler(Looper.getMainLooper())
-    private val vehicle = attempt("Vehicle 준비") { Vehicle(context.applicationContext).also { it.initialize() } }
+    val vehicle = attempt("Vehicle 준비") { Vehicle(context.applicationContext).also { it.initialize() } }
     private var connected = false
     private var tries = 0
 

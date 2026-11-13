@@ -4,8 +4,12 @@ import com.cihmine.napalarm.core.ControlState
 import com.cihmine.napalarm.core.EnergyReading
 import com.cihmine.napalarm.core.Load
 import com.cihmine.napalarm.core.PowerSource
+import com.cihmine.napalarm.core.RealEvBattery
 import kotlinx.coroutines.delay
 import kotlinx.serialization.Serializable
+
+/** 모의 전기차 전비(km/kWh). 주행 가능 거리를 어림하는 데만 쓴다 */
+const val MOCK_KM_PER_KWH = 5.0
 
 /**
  * 시연 패널에서 움직이는 모의 전원 3종과 모의 편의 장치. 실제 배터리·BMS 값이 아니다(화면에 "모의"로 표시).
@@ -33,6 +37,8 @@ data class MockEnergyState(
     val noResponseShed: Boolean = false,
 ) {
     val evLoadW: Double get() = evBaseW + if (evClimateOn) evClimateW else 0.0
+    /** 모의 주행 가능 거리. 전비 5km/kWh 로 어림(60kWh·60% → 180km) */
+    val evRangeKm: Double get() = evCapacityWh * evSoc / 100 / 1000 * MOCK_KM_PER_KWH
     val campingLoadW: Double get() = if (campingLightOn) campingLightW else 0.0
 }
 
@@ -45,14 +51,16 @@ class MockEnergy(initial: MockEnergyState, private val onChange: (MockEnergyStat
         onChange(state)
     }
 
-    /** 지금 측정값. 데이터가 끊기면 아무것도 주지 않는다. */
-    fun readings(nowMs: Long): Map<PowerSource, EnergyReading> {
+    /** 지금 측정값. 데이터가 끊기면 아무것도 주지 않는다. [realEv] 가 있으면 전기차 잔량·용량은 그 값을, [loadW] 가 있으면 전기차 소비 전력은 차량 상태로 어림한 값을 쓴다. */
+    fun readings(nowMs: Long, realEv: RealEvBattery? = null, loadW: Double? = null): Map<PowerSource, EnergyReading> {
         val s = state
         if (s.dataCut) return emptyMap()
         return mapOf(
             PowerSource.EV_TRACTION to EnergyReading(
-                PowerSource.EV_TRACTION, nowMs, usableCapacityWh = s.evCapacityWh, socPercent = s.evSoc,
-                dischargeW = s.evLoadW, charging = s.charging,
+                PowerSource.EV_TRACTION, nowMs, usableCapacityWh = realEv?.capacityWh ?: s.evCapacityWh, socPercent = realEv?.socPercent ?: s.evSoc,
+                // 실제 충전률을 쓸 때 주행 가능 거리는 차량 값만(모의 전비를 섞지 않는다)
+                rangeKm = if (realEv != null) realEv.rangeKm else s.evRangeKm,
+                dischargeW = loadW ?: s.evLoadW, charging = s.charging,
             ),
             PowerSource.CAMPING to EnergyReading(PowerSource.CAMPING, nowMs, remainingWh = s.campingWh, dischargeW = s.campingLoadW, charging = s.charging),
             PowerSource.STARTER_12V to EnergyReading(PowerSource.STARTER_12V, nowMs, voltage = s.starterVoltage, vehicleWarning = s.starterWarning),

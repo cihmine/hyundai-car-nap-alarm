@@ -199,6 +199,21 @@ class NapEngine(state: NapState = NapState()) {
         return true
     }
 
+    /**
+     * 휴식 중에 전체 휴식 시간을 [totalSeconds] 로 바꾼다(시작 시각 기준). 다시 알림 대기·시연 단축 중에는 바꾸지 않는다.
+     * 바꾼 뒤 남은 시간이 1분보다 짧아지면 거절한다(이미 지난 시각으로 옮기지 않음). 새 목표 시각은 저장된다.
+     */
+    fun setDuration(totalSeconds: Long, clock: Clock): NapSession? {
+        val s = state.session?.takeIf { it.status == NapStatus.RESTING && !it.demoShortened } ?: return null
+        if (totalSeconds !in MIN_SECONDS..MAX_SECONDS) return null
+        val deltaMs = (totalSeconds - s.requestedSeconds) * 1000
+        val next = s.copy(requestedSeconds = totalSeconds, targetWallMs = s.targetWallMs + deltaMs, targetMonoMs = s.targetMonoMs + deltaMs)
+        val left = if (sameBoot(next, clock)) next.targetMonoMs - clock.monotonicMs() else next.targetWallMs - clock.wallMs()
+        if (left < MIN_SECONDS * 1000) return null
+        state = state.copy(session = next, prefs = state.prefs.copy(lastMinutes = (totalSeconds / 60).toInt()))
+        return next
+    }
+
     /** 시간 전에 종료 */
     fun stopEarly(clock: Clock): Boolean {
         val s = state.session?.takeIf { it.status == NapStatus.RESTING || it.status == NapStatus.SNOOZED } ?: return false

@@ -41,6 +41,22 @@ enum class VehicleProfile(val label: String, val sources: List<PowerSource>, val
     ICE_CAMPING("내연기관차 + 캠핑 배터리", listOf(PowerSource.STARTER_12V, PowerSource.CAMPING), PowerSource.CAMPING, listOf(Load.CAMPING_LIGHT)),
 }
 
+/**
+ * 차량 SDK 에서 읽은 전기차 구동 배터리 값. 용량을 못 읽으면 [capacityWh] 는 null 이고 모의 용량을 쓴다.
+ * 범위를 벗어난 값은 잔량을 지어내지 않도록 버린다.
+ */
+data class RealEvBattery(val socPercent: Double, val capacityWh: Double?, val rangeKm: Double? = null) {
+    companion object {
+        fun of(soc: Number?, capacityWh: Number?, rangeKm: Number? = null): RealEvBattery? {
+            val percent = soc?.toDouble()?.takeIf { it in 0.0..100.0 } ?: return null
+            return RealEvBattery(
+                percent, capacityWh?.toDouble()?.takeIf { it > 0.0 && it.isFinite() },
+                rangeKm?.toDouble()?.takeIf { it >= 0.0 && it.isFinite() },
+            )
+        }
+    }
+}
+
 /** 전원 하나의 측정값. 모르는 값은 null. [simulated] 는 시연 패널 입력인지(화면에 "모의"로 표시). */
 @Serializable
 data class EnergyReading(
@@ -52,6 +68,8 @@ data class EnergyReading(
     val usableCapacityWh: Double? = null,
     /** 0~100 */
     val socPercent: Double? = null,
+    /** 차량이 알려 준 주행 가능 거리(km). 전기차만 */
+    val rangeKm: Double? = null,
     /** 이 전원에서 나가는 총 소비 전력(W). 공조·조명·변환 손실 포함. 0 이하이면 충전·공급 중 또는 소비 없음 */
     val dischargeW: Double? = null,
     val charging: Boolean = false,
@@ -61,14 +79,34 @@ data class EnergyReading(
     val simulated: Boolean = true,
 )
 
-/** 남겨 둘 에너지. 바닥까지 쓰지 않는다. 퍼센트(용량을 알 때) 또는 Wh. */
+/** 전기차 남길 배터리의 단위. km 는 지금 주행 가능 거리로 %로 바꿔 계산한다. */
+@Serializable
+enum class ReserveUnit { PERCENT, KM }
+
+/** 남겨 둘 에너지. 바닥까지 쓰지 않는다. 전기차는 퍼센트 또는 주행 가능 km, 캠핑 배터리는 Wh. */
 @Serializable
 data class ReserveSettings(
     val evReserveSoc: Double = 30.0,
     val campingReserveWh: Double = 200.0,
     /** 보호 기준 몇 분 전에 먼저 깨울지(초기 제안값) */
     val warningLeadMinutes: Int = 10,
-)
+    val evUnit: ReserveUnit = ReserveUnit.PERCENT,
+    /** [evUnit] 이 KM 일 때 남길 주행 가능 거리 */
+    val evReserveKm: Double = 100.0,
+) {
+    /** 화면에 쓰는 남길 양("30%" 또는 "100km") */
+    val evLabel: String get() = if (evUnit == ReserveUnit.KM) "${evReserveKm.toInt()}km" else "${evReserveSoc.toInt()}%"
+
+    /**
+     * 남길 양을 충전률(%)로. km 이면 지금 1% 당 주행 거리(주행 가능 거리 ÷ 충전률)로 바꾼다.
+     * 주행 가능 거리를 모르거나 충전률이 0 이면 바꿀 수 없어 null(지어내지 않는다).
+     */
+    fun evSocFor(socPercent: Double?, rangeKm: Double?): Double? = when (evUnit) {
+        ReserveUnit.PERCENT -> evReserveSoc
+        ReserveUnit.KM -> if (socPercent != null && socPercent > 0.0 && rangeKm != null && rangeKm > 0.0)
+            (evReserveKm * socPercent / rangeKm).coerceIn(0.0, 100.0) else null
+    }
+}
 
 enum class UnknownReason(val label: String) {
     NO_SOURCE("전원 데이터 없음 — 알람만 사용해요"),
@@ -127,7 +165,7 @@ object RuntimeEstimator {
             ?: if (reading.usableCapacityWh != null && reading.socPercent != null) reading.usableCapacityWh * reading.socPercent / 100 else null
             ?: return RuntimeEstimate.Unknown(source, UnknownReason.MISSING)
         val reserveWh = when (source) {
-            PowerSource.EV_TRACTION -> reading.usableCapacityWh?.let { it * reserve.evReserveSoc / 100 }
+            PowerSource.EV_TRACTION -> reading.usableCapacityWh?.let { cap -> reserve.evSocFor(reading.socPercent, reading.rangeKm)?.let { cap * it / 100 } }
             PowerSource.CAMPING -> reserve.campingReserveWh
             PowerSource.STARTER_12V -> null
         } ?: return RuntimeEstimate.Unknown(source, UnknownReason.NO_RESERVE_BASIS)

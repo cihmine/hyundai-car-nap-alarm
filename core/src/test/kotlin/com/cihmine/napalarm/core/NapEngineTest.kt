@@ -179,21 +179,13 @@ class NapEngineTest {
     }
 
     @Test
-    fun `N-T08 음성 시간 해석과 재확인 문구`() {
-        assertEquals(Utterance.Duration(30), VoiceParser.parse("30분"))
-        assertEquals(Utterance.Duration(30), VoiceParser.parse("삼십 분 뒤에 깨워 줘"))
-        assertEquals(Utterance.Duration(3), VoiceParser.parse("3분"))
-        assertEquals(Utterance.Duration(15), VoiceParser.parse("십오분"))
-        assertEquals(Utterance.Duration(90), VoiceParser.parse("한 시간 반"))
-        assertEquals(Utterance.Duration(90), VoiceParser.parse("1시간 30분 후"))
-        assertEquals(Utterance.Duration(120), VoiceParser.parse("두 시간"))
-        assertEquals(Utterance.Command(NapCommand.SNOOZE), VoiceParser.parse("5분 더"))
-        assertEquals(Utterance.Command(NapCommand.WAKE), VoiceParser.parse("일어났어"))
-        assertEquals(Utterance.Command(NapCommand.YES), VoiceParser.parse("네"))
-        assertEquals(Utterance.Unknown, VoiceParser.parse("오늘 날씨 어때"))
+    fun `N-T08 화면 시각·예상 시간 문구`() {
         val zone = ZoneId.of("Asia/Seoul")
-        val at = java.time.ZonedDateTime.of(2026, 11, 2, 14, 0, 0, 0, zone).toInstant().toEpochMilli()
-        assertEquals("30분 뒤, 오후 2시 30분에 알려 드릴까요?", Texts.confirmDuration(30, at, zone))
-        assertEquals("1시간 뒤, 오후 3시에 알려 드릴까요?", Texts.confirmDuration(60, at, zone))
+        val at = java.time.ZonedDateTime.of(2026, 11, 2, 14, 30, 0, 0, zone).toInstant().toEpochMilli()
+        assertEquals("오후 2시 30분", Texts.clock(at, zone))
+        assertEquals("오후 3시", Texts.clock(at + 30 * 60_000L, zone))
+        assertEquals("약 6시간 30분", Texts.roughMinutes(390.0))
+        assertEquals("약 271시간", Texts.roughMinutes(270 * 60.0 + 54))
+        assertEquals("45분", Texts.roughMinutes(45.0))
     }
 }

@@ -38,7 +38,7 @@ enum class NapStatus {
 @Serializable
 enum class EndReason(val label: String) {
     WOKE("알람 후 기상 확인"),
-    STOPPED_EARLY("시간 전에 종료"),
+    STOPPED_EARLY("알람 전에 직접 끝냄"),
 
     /** 앱이 꺼져 있어 예정 시각에 알람이 울리지 않음 */
     MISSED_WHILE_OFF("앱이 꺼져 알람이 울리지 않음"),
@@ -107,12 +107,17 @@ data class RestPreferences(
     val lastMinutes: Int = 30,
     val profile: VehicleProfile = VehicleProfile.EV,
     val reserve: ReserveSettings = ReserveSettings(),
+    val modes: ModeSettings = ModeSettings(),
+    val activeMode: ActiveMode? = null,
+    /** 사용자가 하단바 + 로 추가한 모드 */
+    val customModes: List<CustomMode> = emptyList(),
 )
 
 @Serializable
 enum class SeatPreset(val label: String) {
     UPRIGHT("기본 자세"),
     RECLINE("휴식 자세(등받이 젖힘)"),
+    FLAT("차박 자세(평평하게)"),
 }
 
 object NapJson {

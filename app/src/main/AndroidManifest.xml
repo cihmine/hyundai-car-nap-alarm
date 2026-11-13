@@ -2,26 +2,19 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
 
-    <!-- "일어났어", "5분 더", "30분" 같은 음성 명령 -->
-    <uses-permission android:name="android.permission.RECORD_AUDIO" />
-    <!-- Pleos 음성 인식·안내 SDK -->
-    <uses-permission android:name="pleos.car.permission.STT_SERVICE" />
-    <uses-permission android:name="pleos.car.permission.TTS_SERVICE" />
     <!-- 기어 상태 읽기 -->
     <uses-permission android:name="pleos.car.permission.CAR_DRIVE" />
+    <!-- 전기차 배터리 잔량·용량 읽기 -->
+    <uses-permission android:name="pleos.car.permission.CAR_ENERGY" />
+    <uses-permission android:name="pleos.car.permission.CAR_INFO" />
+    <!-- 공조 상태 읽기(소비 전력 어림) -->
+    <uses-permission android:name="pleos.car.permission.CAR_CLIMATE" />
+    <!-- 실내등 읽기·끄기 -->
+    <uses-permission android:name="pleos.car.permission.CAR_LIGHTS" />
+    <uses-permission android:name="pleos.car.permission.CONTROL_CAR_LIGHTS" />
 
     <!-- 차량(Pleos Connect)용이지만 일반 에뮬레이터에서도 확인할 수 있게 필수로 두지 않는다 -->
     <uses-feature android:name="android.hardware.type.automotive" android:required="false" tools:replace="android:required" />
-    <uses-feature android:name="android.hardware.microphone" android:required="false" />
-
-    <queries>
-        <intent>
-            <action android:name="android.speech.RecognitionService" />
-        </intent>
-        <intent>
-            <action android:name="android.intent.action.TTS_SERVICE" />
-        </intent>
-    </queries>
 
     <application
         android:allowBackup="false"
