@@ -224,6 +224,35 @@ sealed interface GuardEvent {
     data object StarterWarning : GuardEvent
 }
 
+/**
+ * 충전 대기 모드의 감시 상태(낮잠 타이머·전력 보호와 별개). 모드를 켜면 만들고 끄면 비운다.
+ * [armed]: 충전률이 목표보다 낮은 것을 한 번 봤는지(이미 넘은 상태에서 켜도 바로 울리지 않게).
+ * [done]: 이번 대기에서 이미 알렸는지(한 번만). [ringing]: 알람이 울리는 중.
+ */
+@Serializable
+data class ChargeWaitState(
+    val startedWallMs: Long,
+    val armed: Boolean = false,
+    val done: Boolean = false,
+    val ringing: Boolean = false,
+    val reachedSoc: Double? = null,
+)
+
+/**
+ * 충전 완료 판단. 순수 함수. 충전률이 목표보다 낮은 것을 본 뒤 목표 이상이 되면 한 번 울린다.
+ * 충전 중 여부 신호에 기대지 않고 충전률이 아래에서 위로 넘는 것만 본다 — 공개 SDK 로 충전 상태를 못 읽어도 실제 충전률로 동작한다.
+ */
+object ChargeWatch {
+    fun step(s: ChargeWaitState, socPercent: Double?, targetSoc: Int): Pair<ChargeWaitState, Boolean> {
+        if (socPercent == null || s.done) return s to false
+        return when {
+            socPercent < targetSoc -> (if (s.armed) s else s.copy(armed = true)) to false
+            s.armed -> s.copy(done = true, ringing = true, reachedSoc = socPercent) to true
+            else -> s to false
+        }
+    }
+}
+
 /** 보호 판단. 순수 함수: 상태와 입력을 받아 새 상태와 이벤트를 돌려준다. */
 object EnergyGuard {
     fun start(profile: VehicleProfile, nowMs: Long) = EnergyGuardState(profile = profile, lastTransitionAtMs = nowMs)

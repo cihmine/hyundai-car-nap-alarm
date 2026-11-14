@@ -8,6 +8,9 @@ enum class RestMode(val label: String, val icon: String) {
     CAMPING("캠핑", "🏕"),
     MOVIE("영화관", "🎬"),
     NAP("낮잠", "😴"),
+
+    /** 전기차 충전 중 차에서 기다리기: 설정 적용 + 충전률 감시(타이머 없음). 전기차에서만 하단바에 보인다 */
+    CHARGE("충전 대기", "🔌"),
 }
 
 /** 모드별로 사용자가 저장해 두는 설정 */
@@ -19,17 +22,20 @@ data class ModeSettings(
     val camping: ModeSetting = ModeSetting(lightsOff = false, radioOn = false, seat = SeatPreset.FLAT),
     val movie: ModeSetting = ModeSetting(lightsOff = true, radioOn = true, seat = SeatPreset.RECLINE),
     val nap: ModeSetting = ModeSetting(lightsOff = true, radioOn = false, seat = SeatPreset.RECLINE),
+    val charge: ModeSetting = ModeSetting(lightsOff = false, radioOn = true, seat = SeatPreset.RECLINE),
 ) {
     fun of(mode: RestMode): ModeSetting = when (mode) {
         RestMode.CAMPING -> camping
         RestMode.MOVIE -> movie
         RestMode.NAP -> nap
+        RestMode.CHARGE -> charge
     }
 
     fun with(mode: RestMode, setting: ModeSetting): ModeSettings = when (mode) {
         RestMode.CAMPING -> copy(camping = setting)
         RestMode.MOVIE -> copy(movie = setting)
         RestMode.NAP -> copy(nap = setting)
+        RestMode.CHARGE -> copy(charge = setting)
     }
 }
 
@@ -57,9 +63,10 @@ private fun keyOf(mode: RestMode?, customId: String?): String = customId?.let { 
 /** 하단바 한 칸(기본 모드 또는 추가한 모드) */
 data class ModeView(val key: String, val icon: String, val name: String, val setting: ModeSetting, val mode: RestMode?, val custom: CustomMode?)
 
-/** 하단바 순서: 기본 모드 3개 다음에 추가한 순서대로 */
+/** 하단바 순서: 기본 모드(충전 대기는 전기차만) 다음에 추가한 순서대로 */
 fun RestPreferences.modeViews(): List<ModeView> =
-    RestMode.entries.map { ModeView(it.name, it.icon, it.label, modes.of(it), it, null) } +
+    RestMode.entries.filter { it != RestMode.CHARGE || profile == VehicleProfile.EV }
+        .map { ModeView(it.name, it.icon, it.label, modes.of(it), it, null) } +
         customModes.map { ModeView(keyOf(null, it.id), it.icon, it.name, it.setting, null, it) }
 
 /** 켜진 모드의 표시 정보. 추가한 모드를 지웠으면 null */

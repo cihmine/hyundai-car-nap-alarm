@@ -15,6 +15,8 @@ data class NapState(
     val nextId: Long = 1,
     /** 이번 휴식의 전력 보호 상태(기상 타이머와 별개). 휴식이 끝나면 비운다. */
     val guard: EnergyGuardState? = null,
+    /** 충전 대기 모드 감시(타이머 없음). 모드가 꺼져 있으면 null */
+    val chargeWait: ChargeWaitState? = null,
 ) {
     val active: Boolean get() = session != null && session.status != NapStatus.FINISHED
 }
@@ -83,6 +85,38 @@ class NapEngine(state: NapState = NapState()) {
 
     fun setPreferences(prefs: RestPreferences) {
         state = state.copy(prefs = prefs)
+    }
+
+    // ── 충전 대기 모드(타이머 없음) ────────────────────────
+
+    /** 충전 대기 감시를 켜거나 끈다(모드 켜짐 여부에 맞춘다). 이미 같은 상태면 그대로 둔다. */
+    fun syncChargeWait(on: Boolean, clock: Clock) {
+        val now = state.chargeWait
+        if (on && now == null) state = state.copy(chargeWait = ChargeWaitState(clock.wallMs()))
+        if (!on && now != null) state = state.copy(chargeWait = null)
+    }
+
+    /** 목표 충전률(%)을 바꾼다. 감시 중이면 판단을 처음부터 다시 한다(지금 충전률이 새 목표보다 낮은 것을 본 뒤에 울린다). */
+    fun setChargeTarget(soc: Int) {
+        val v = soc.coerceIn(ChargeWake.MIN, ChargeWake.MAX)
+        state = state.copy(prefs = state.prefs.copy(chargeTargetSoc = v), chargeWait = state.chargeWait?.copy(armed = false, done = false, ringing = false, reachedSoc = null))
+    }
+
+    /**
+     * 충전 대기 감시 한 단계. 전기차이고 최근(오래되지 않은) 충전률일 때만 본다. 목표에 닿아 알람을 시작하면 true.
+     */
+    fun chargeTick(readings: Map<PowerSource, EnergyReading>, clock: Clock): Boolean {
+        val w = state.chargeWait ?: return false
+        if (state.prefs.profile.managed != PowerSource.EV_TRACTION) return false
+        val soc = readings[PowerSource.EV_TRACTION]?.takeIf { clock.wallMs() - it.sampledAtMs <= RuntimeEstimator.STALE_MS }?.socPercent
+        val (next, rang) = ChargeWatch.step(w, soc, state.prefs.chargeTargetSoc)
+        if (next != w) state = state.copy(chargeWait = next)
+        return rang
+    }
+
+    /** 충전 완료 알람 끄기(감시 상태는 남김 — 모드를 끄면 비운다) */
+    fun ackChargeAlarm() {
+        state.chargeWait?.let { state = state.copy(chargeWait = it.copy(ringing = false)) }
     }
 
     // ── 시간 ──────────────────────────────────────────────

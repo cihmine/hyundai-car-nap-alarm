@@ -11,6 +11,9 @@ import kotlinx.serialization.Serializable
 /** 모의 전기차 전비(km/kWh). 주행 가능 거리를 어림하는 데만 쓴다 */
 const val MOCK_KM_PER_KWH = 5.0
 
+/** 모의 급속충전 속도(W). 충전 중이면 전기차 충전률이 이 속도로 오른다(시연 입력, 실제 충전기 값 아님) */
+const val MOCK_CHARGE_W = 50_000.0
+
 /**
  * 시연 패널에서 움직이는 모의 전원 3종과 모의 편의 장치. 실제 배터리·BMS 값이 아니다(화면에 "모의"로 표시).
  * 숫자는 계획서 12.3 데모 예시 그대로: 전기차 60kWh·SOC 60%·1.5kW / 캠핑 배터리 800Wh·조명 100W.
@@ -67,11 +70,15 @@ class MockEnergy(initial: MockEnergyState, private val onChange: (MockEnergyStat
         )
     }
 
-    /** [dtMs] 만큼 소비(배속 반영). 화면 갱신마다 저장하지 않도록 onChange 는 부르지 않는다. */
+    /** [dtMs] 만큼 소비(배속 반영). 충전 중이면 모의 급속충전으로 전기차 충전률을 올린다. 화면 갱신마다 저장하지 않도록 onChange 는 부르지 않는다. */
     fun drain(dtMs: Long) {
         val s = state
-        if (s.charging || dtMs <= 0) return
+        if (dtMs <= 0) return
         val hours = dtMs / 3_600_000.0 * s.drainSpeed
+        if (s.charging) {
+            state = s.copy(evSoc = (s.evSoc + MOCK_CHARGE_W * hours / s.evCapacityWh * 100).coerceAtMost(100.0))
+            return
+        }
         state = s.copy(
             evSoc = (s.evSoc - s.evLoadW * hours / s.evCapacityWh * 100).coerceAtLeast(0.0),
             campingWh = (s.campingWh - s.campingLoadW * hours).coerceAtLeast(0.0),

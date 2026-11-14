@@ -81,6 +81,15 @@ enum class AlarmReason(val title: String) {
     STARTER_WARNING("차량이 12V 배터리 경고를 보냈어요"),
 }
 
+/** 충전 대기 모드에서 고를 수 있는 목표 충전률(%) */
+object ChargeWake {
+    const val MIN = 50
+    const val MAX = 100
+    const val STEP = 5
+    const val DEFAULT = 80
+    val PRESETS = listOf(80, 90, 100)
+}
+
 /** 끝난 휴식 기록. 수면 시간이 아니라 앱 세션 시간이다. */
 @Serializable
 data class NapRecord(
@@ -111,6 +120,8 @@ data class RestPreferences(
     val activeMode: ActiveMode? = null,
     /** 사용자가 하단바 + 로 추가한 모드 */
     val customModes: List<CustomMode> = emptyList(),
+    /** 충전 대기 모드: 충전률이 이 값(%)까지 차오르면 알린다 */
+    val chargeTargetSoc: Int = ChargeWake.DEFAULT,
 )
 
 @Serializable

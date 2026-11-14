@@ -12,6 +12,7 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.ui.unit.min
 import androidx.compose.foundation.Canvas
+import com.cihmine.napalarm.core.ChargeWake
 import com.cihmine.napalarm.core.ModeView
 import androidx.compose.foundation.layout.size
 import androidx.compose.ui.graphics.Brush
@@ -124,9 +125,14 @@ fun NapApp(c: NapController) {
             }
             // 낮잠(휴식 중·원래대로 되돌리기)도 메인 화면의 옆 창에서 끝난다. 깨워야 하는 알람만 전체 화면
             val main = status != NapStatus.RINGING && status != NapStatus.OVERDUE
+            val chargeRinging = ui.nap.chargeWait?.ringing == true
             Row(Modifier.fillMaxSize()) {
                 Column(Modifier.weight(1f).fillMaxHeight()) {
-                    if (main) MainScreen(ui, c)
+                    if (main && chargeRinging) Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(24.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
+                        ui.sceneCaption?.let { SceneCaption(it) }
+                        ChargeRinging(ui, c)
+                    }
+                    else if (main) MainScreen(ui, c)
                     else Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(24.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
                         ui.sceneCaption?.let { SceneCaption(it) }
                         when (status) {
@@ -540,8 +546,12 @@ private fun ModeForm(ui: NapUi, c: NapController, m: ModeView, close: () -> Unit
     }, fontSize = 20.sp, color = if (on) Accent else Color.Gray)
     // 보호 범위를 모드마다 분명히: 배터리 보호 감시는 낮잠 세션에서만 돈다
     Text(
-        if (m.mode == RestMode.NAP) "🛡 타이머 + 배터리 보호 감시(휴식 중)" else "환경 설정만 적용 · 배터리 보호 감시는 낮잠에서만",
-        fontSize = 17.sp, color = if (m.mode == RestMode.NAP) GoodPower else Color.LightGray,
+        when (m.mode) {
+            RestMode.NAP -> "🛡 타이머 + 배터리 보호 감시(휴식 중)"
+            RestMode.CHARGE -> "🔌 타이머 없이 충전률 감시 · 목표에 닿으면 알람"
+            else -> "환경 설정만 적용 · 배터리 보호 감시는 낮잠에서만"
+        },
+        fontSize = 17.sp, color = if (m.mode == RestMode.NAP || m.mode == RestMode.CHARGE) GoodPower else Color.LightGray,
     )
     if (napEnd) RestoreFinishButton(ui, c)
     else Button(onClick = { if (napOn) c.stopEarly() else c.pressModeKey(m.key) }, enabled = napOn || enabled, modifier = Modifier.fillMaxWidth().height(76.dp)) {
@@ -561,6 +571,10 @@ private fun ModeForm(ui: NapUi, c: NapController, m: ModeView, close: () -> Unit
     HorizontalDivider()
     if (m.mode == RestMode.NAP) {
         if (napEnd) Restore(ui, c, top = false) else NapTime(ui, c, napOn)
+        HorizontalDivider()
+    }
+    if (m.mode == RestMode.CHARGE) {
+        ChargePanel(ui, c, on)
         HorizontalDivider()
     }
     // 주행·상태 불명: 설정 편집을 닫는다(켜진 모드 끄기는 위 버튼이 주차 여부로 따로 막음)
@@ -612,6 +626,51 @@ private fun NapTime(ui: NapUi, c: NapController, napOn: Boolean) {
         OutlinedButton(onClick = { set(total - 5) }, Modifier.height(52.dp)) { Text("−5", fontSize = 18.sp) }
         Text("${total}분", fontSize = 22.sp, fontWeight = FontWeight.Bold, modifier = Modifier.align(Alignment.CenterVertically))
         OutlinedButton(onClick = { set(total + 5) }, Modifier.height(52.dp)) { Text("+5", fontSize = 18.sp) }
+    }
+}
+
+/** 지금 화면에 쓰는 전기차 충전률(실제 값을 쓰는 중이면 실제, 아니면 모의) */
+private fun shownSoc(ui: NapUi): Double = ui.realEv?.takeIf { ui.realEvInUse }?.socPercent ?: ui.energy.evSoc
+
+/**
+ * 충전 대기 창의 가운데 칸: 지금 충전률 → 목표, 목표 고르기(80·90·100·±5). 켜져 있는 동안에도 바꿀 수 있다.
+ * 감시는 타이머 없이 충전률만 본다.
+ */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun ChargePanel(ui: NapUi, c: NapController, on: Boolean) {
+    val target = ui.nap.prefs.chargeTargetSoc
+    val soc = shownSoc(ui)
+    val sim = if (ui.realEvInUse) "" else " (모의)"
+    Text("지금 ${soc.toInt()}% → 목표 ${target}%", fontSize = 40.sp, fontWeight = FontWeight.Light, color = Color(0xFFB0B0C0))
+    Text(when {
+        !on -> "켜면 충전률이 ${target}%에 닿을 때 알려 드려요$sim"
+        soc >= target && ui.nap.chargeWait?.armed != true -> "이미 ${target}%를 넘었어요 — 목표를 올리면 다시 감시해요"
+        else -> "충전 감시 중 · ${target}%에 닿으면 알람$sim"
+    }, fontSize = 18.sp, color = if (on) Accent else Color.Gray)
+    Text("목표 충전률", fontSize = 20.sp, color = Color.LightGray)
+    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        ChargeWake.PRESETS.forEach { p -> FilterChip(target == p, { c.setChargeTarget(p) }, { Text("${p}%", fontSize = 18.sp) }, modifier = Modifier.height(52.dp)) }
+        OutlinedButton(onClick = { c.setChargeTarget(target - ChargeWake.STEP) }, Modifier.height(52.dp)) { Text("−5", fontSize = 18.sp) }
+        Text("${target}%", fontSize = 22.sp, fontWeight = FontWeight.Bold, modifier = Modifier.align(Alignment.CenterVertically))
+        OutlinedButton(onClick = { c.setChargeTarget(target + ChargeWake.STEP) }, Modifier.height(52.dp)) { Text("+5", fontSize = 18.sp) }
+    }
+    Text("충전기 연결 여부가 아니라 차량이 알려 주는 충전률로 판단해요.", fontSize = 15.sp, color = Color.Gray)
+}
+
+/** 충전 대기 알람(전체 화면). 낮잠 알람과 따로 울린다 */
+@Composable
+private fun ChargeRinging(ui: NapUi, c: NapController) {
+    val target = ui.nap.prefs.chargeTargetSoc
+    Column(verticalArrangement = Arrangement.spacedBy(20.dp)) {
+        Text("충전이 ${target}%까지 찼어요", fontSize = 40.sp, fontWeight = FontWeight.Bold, color = Accent)
+        Text("🔌 충전 대기 알람이에요. 충전기를 빼고 자리를 비워 주세요.", fontSize = 22.sp)
+        Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+            Button(onClick = { c.ackCharge(stopMode = true) }, Modifier.height(88.dp)) { Text("확인 · 충전 대기 끄기", fontSize = 26.sp) }
+            OutlinedButton(onClick = { c.ackCharge(stopMode = false) }, Modifier.height(88.dp)) { Text("소리만 끄기", fontSize = 26.sp) }
+        }
+        Text("지금 ${shownSoc(ui).toInt()}%${if (ui.realEvInUse) "" else " (모의)"} · 충전 대기를 끄면 실내등·시트·라디오를 원래대로 되돌려요", fontSize = 18.sp, color = Color.LightGray)
+        Message(ui)
     }
 }
 
@@ -714,6 +773,7 @@ private fun ModeBar(ui: NapUi, open: String?, onTab: (String) -> Unit) {
                 on -> "${m.name} 켜짐"
                 m.mode == RestMode.NAP && napBusy -> "${m.name} 중"
                 m.mode == RestMode.NAP -> "${m.name} · ${ui.nap.prefs.lastMinutes}분"
+                m.mode == RestMode.CHARGE -> "${m.name} · ${ui.nap.prefs.chargeTargetSoc}%"
                 else -> m.name
             }
             Tab(on, open == m.key, m.icon, label, iconSize, labelSize) { onTab(m.key) }
@@ -902,6 +962,7 @@ private fun DemoPanel(ui: NapUi, c: NapController) {
         Button(onClick = c::sceneEv, enabled = idle, modifier = Modifier.fillMaxWidth()) { Text("장면 1 · 전기차 전력 보호") }
         Button(onClick = c::sceneCamping, enabled = idle, modifier = Modifier.fillMaxWidth()) { Text("장면 2 · 내연기관차 + 캠핑 배터리") }
         Button(onClick = c::sceneStarter, enabled = idle, modifier = Modifier.fillMaxWidth()) { Text("장면 3 · 12V 만 있는 차(계산 불가)") }
+        Button(onClick = c::sceneCharge, enabled = idle && ui.nap.prefs.activeMode == null, modifier = Modifier.fillMaxWidth()) { Text("장면 4 · 충전 대기(목표 충전률 알람)") }
         HorizontalDivider()
         DemoSettings(ui, c)
         HorizontalDivider()
@@ -920,7 +981,7 @@ private fun DemoPanel(ui: NapUi, c: NapController) {
         }
         Toggle("배터리 소모 30배속(시간 단축)", e.drainSpeed > 1) { on -> c.energy { copy(drainSpeed = if (on) 30 else 1) } }
         Toggle("측정값 끊김", e.dataCut) { on -> c.energy { copy(dataCut = on) } }
-        Toggle("충전/전원 공급 중", e.charging) { on -> c.energy { copy(charging = on) } }
+        Toggle("충전/전원 공급 중(모의 50kW · 휴식 중 충전률 상승)", e.charging) { on -> c.energy { copy(charging = on) } }
         Toggle("12V 경고 신호(차량)", e.starterWarning) { on -> c.energy { copy(starterWarning = on) } }
         Toggle("장치 종료 실패", e.failShed) { on -> c.energy { copy(failShed = on) } }
         Toggle("장치 종료 응답 없음", e.noResponseShed) { on -> c.energy { copy(noResponseShed = on) } }

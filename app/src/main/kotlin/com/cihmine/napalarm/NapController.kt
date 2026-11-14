@@ -5,6 +5,7 @@ import android.os.SystemClock
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.cihmine.napalarm.core.AlarmReason
+import com.cihmine.napalarm.core.ChargeWake
 import com.cihmine.napalarm.core.Clock
 import com.cihmine.napalarm.core.GuardEvent
 import com.cihmine.napalarm.core.GuardStatus
@@ -156,6 +157,8 @@ class NapController(app: Application) : AndroidViewModel(app) {
     private val createdElapsed = SystemClock.elapsedRealtime()
     /** 시연 장면 전의 차종·남길 배터리(장면이 끝나면 되돌림). 앱이 꺼지면 잊는다 */
     private var beforeScene: Pair<VehicleProfile, ReserveSettings>? = null
+    /** 장면 4(충전 대기) 전의 차종·목표 충전률. 앱이 꺼지면 잊는다 */
+    private var chargeScene: Pair<VehicleProfile, Int>? = null
     private val evBattery = PleosEvBattery(gear.vehicle) { value ->
         realEv = value
         if (value != null) {
@@ -192,7 +195,7 @@ class NapController(app: Application) : AndroidViewModel(app) {
             RestoreOutcome.NOTHING -> null
         }
         commit(message)
-        if (engine.session?.status == NapStatus.RINGING) alarm.start()
+        if (engine.session?.status == NapStatus.RINGING || engine.state.chargeWait?.ringing == true) alarm.start()
         if (engine.session?.status == NapStatus.RESTORE_PENDING) refreshRestorePlan()
         startTicker()
     }
@@ -200,6 +203,10 @@ class NapController(app: Application) : AndroidViewModel(app) {
     /** 저장을 끝낸 뒤 화면에 반영한다. */
     private fun commit(message: String? = null) {
         endNapModeIfDone()
+        // 충전 대기 감시는 '충전 대기' 모드가 켜져 있는 동안만 돈다
+        val wait = engine.state.chargeWait
+        engine.syncChargeWait(engine.state.prefs.activeMode?.mode == RestMode.CHARGE, clock)
+        if (wait != null && engine.state.chargeWait == null) onChargeWaitStopped(wait.ringing)
         val saved = runCatching { store.save(engine.state) }.isSuccess
         // 저장에 실패하면 성공 안내로 덮지 않는다.
         val shown = if (saved) message else "저장 실패 — 앱을 다시 켜면 휴식이 이어지지 않을 수 있어요"
@@ -229,7 +236,7 @@ class NapController(app: Application) : AndroidViewModel(app) {
                 val now = SystemClock.elapsedRealtime()
                 // 휴식 중에만 모의 배터리를 소모한다(설정 화면에서는 값이 그대로)
                 val st = engine.session?.status
-                if (st == NapStatus.RESTING || st == NapStatus.SNOOZED || st == NapStatus.RINGING) energy.drain(now - last)
+                if (st == NapStatus.RESTING || st == NapStatus.SNOOZED || st == NapStatus.RINGING || engine.state.chargeWait != null) energy.drain(now - last)
                 last = now
                 energyTick()
                 checkReservation()
@@ -264,7 +271,14 @@ class NapController(app: Application) : AndroidViewModel(app) {
             cabinLightOn = withClimate.cabinLightOn ?: (mockLight != ModeRules.LIGHT_OFF),
         )
         val load = if (useReal) CabinLoad.estimate(cs) else null
-        val t = engine.energyTick(energy.readings(clock.wallMs(), ev, load?.watts), clock)
+        val readings = energy.readings(clock.wallMs(), ev, load?.watts)
+        val t = engine.energyTick(readings, clock)
+        // 충전 대기: 목표 충전률에 닿으면 알람(낮잠 타이머와 별개)
+        val waitBefore = engine.state.chargeWait
+        if (engine.chargeTick(readings, clock)) {
+            commit("충전이 ${engine.state.prefs.chargeTargetSoc}%까지 찼어요")
+            alarm.start()
+        } else if (engine.state.chargeWait != waitBefore) commit()
         _ui.update { it.copy(estimate = t.estimate, realEv = ev, realLoad = load) }
         if (engine.state.guard != before) commit()
         t.events.forEach { ev ->
@@ -348,6 +362,20 @@ class NapController(app: Application) : AndroidViewModel(app) {
             evReserveSoc = r.evReserveSoc.coerceIn(10.0, 80.0), evReserveKm = r.evReserveKm.coerceIn(20.0, 400.0), campingReserveWh = r.campingReserveWh.coerceIn(50.0, 1_000.0),
         )))
         commit()
+    }
+
+    /** 충전 완료 알람 목표(%). null = 끔. 휴식 중에도 바꿀 수 있다(바꾸면 지금 충전률부터 다시 판단) */
+    fun setChargeTarget(soc: Int) {
+        engine.setChargeTarget(soc)
+        commit("충전이 ${engine.state.prefs.chargeTargetSoc}%까지 차면 알려 드릴게요")
+    }
+
+    /** 충전 완료 알람 확인. [stopMode] 면 충전 대기 모드도 끄고 원래대로 되돌린다. */
+    fun ackCharge(stopMode: Boolean) {
+        alarm.stop()
+        engine.ackChargeAlarm()
+        commit("충전 완료 알람을 껐어요")
+        if (stopMode && engine.state.prefs.activeMode?.mode == RestMode.CHARGE) pressModeKey(RestMode.CHARGE.name)
     }
 
     /** 모드 설정 저장. 낮잠 모드의 시트는 휴식 시작 때 쓰는 값이기도 하다. */
@@ -747,6 +775,39 @@ class NapController(app: Application) : AndroidViewModel(app) {
         caption("장면 3 · 1/2  12V 시동 배터리만 있는 차 → 전압만으로는 남은 시간을 알 수 없어 '계산 불가' · 알람만 써요")
         delay(10_000); if (!sceneAlive(id)) return@runScene
         caption("장면 3 · 2/2  20초 뒤 평소처럼 알람이 울려요(시간 단축). 시연 패널의 '12V 경고 신호'로 차량 경고 알람도 볼 수 있어요")
+    }
+
+    /**
+     * 장면 4 · 충전 대기 모드: 전기차·목표 80%로 맞추고 '충전 대기'를 켠 뒤 모의 72% → 50kW 충전(30배속) → 80% 알람.
+     * 알람을 확인하고 모드를 끄면 장면 전의 차종·목표·모의 충전으로 돌려놓는다([onChargeWaitStopped]).
+     */
+    fun sceneCharge() {
+        if (engine.state.active || engine.state.prefs.activeMode != null) return commit("켜져 있는 모드·휴식을 먼저 꺼 주세요")
+        endScene()
+        _ui.update { it.copy(demoPanel = false) }
+        energy.update { MockEnergyState(failShed = failShed, noResponseShed = noResponseShed, evSoc = 72.0, charging = true) }
+        val prefs = engine.state.prefs
+        chargeScene = prefs.profile to prefs.chargeTargetSoc
+        engine.setPreferences(prefs.copy(profile = VehicleProfile.EV))
+        engine.setChargeTarget(ChargeWake.DEFAULT)
+        pressModeKey(RestMode.CHARGE.name)
+        scene = viewModelScope.launch {
+            caption("장면 4 · 1/2  휴게소 급속충전 중 차에서 기다리기 · '충전 대기' 켬 · 지금 72% · 목표 ${ChargeWake.DEFAULT}% (모의 50kW 충전, 타이머 없음)")
+            delay(6_000); if (engine.state.chargeWait == null) return@launch
+            energy.update { copy(drainSpeed = 30) }
+            caption("장면 4 · 2/2  충전 30배속(시간 단축) → ${ChargeWake.DEFAULT}%에 닿으면 알람이 울려요")
+        }
+    }
+
+    /** 충전 대기가 꺼졌을 때(모드 끄기·다른 모드 켜기). 장면 4 였으면 장면 전 값으로 돌려놓는다. */
+    private fun onChargeWaitStopped(wasRinging: Boolean) {
+        if (wasRinging) alarm.stop()
+        val before = chargeScene ?: return
+        chargeScene = null
+        endScene()
+        engine.setPreferences(engine.state.prefs.copy(profile = before.first))
+        engine.setChargeTarget(before.second)
+        if (energy.state.charging) energy.update { copy(charging = false) }
     }
 
     private fun runScene(profile: VehicleProfile, demo20s: Boolean = false, steps: suspend (String) -> Unit) {

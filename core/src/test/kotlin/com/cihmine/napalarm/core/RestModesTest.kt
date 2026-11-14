@@ -80,7 +80,9 @@ class RestModesTest {
     fun `모드를 추가하면 하단바 끝에 붙고 저장 왕복 뒤에도 남는다`() {
         val (prefs, mode) = added(RestPreferences(), "  독서 ")
         assertEquals("독서", mode.name)
-        assertEquals(listOf("캠핑", "영화관", "낮잠", "독서"), prefs.modeViews().map { it.name })
+        assertEquals(listOf("캠핑", "영화관", "낮잠", "충전 대기", "독서"), prefs.modeViews().map { it.name })
+        // 충전 대기는 전기차에서만 보인다
+        assertEquals(listOf("캠핑", "영화관", "낮잠", "독서"), prefs.copy(profile = VehicleProfile.ICE).modeViews().map { it.name })
         val back = NapCodec.decode(NapCodec.encode(NapState(prefs = prefs)))
         assertEquals(prefs.customModes, back.prefs.customModes)
     }
